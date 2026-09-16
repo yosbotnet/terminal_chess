@@ -63,3 +63,27 @@ fn small_terminal_does_not_panic() {
     let _ = screen(&mut app, 30, 8);
     let _ = screen(&mut app, 10, 2);
 }
+
+#[test]
+fn review_draws_the_past_position_and_eval() {
+    use terminal_chess::lichess::{Eval, Event, PlyEval};
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::GameFull {
+        game_id: "g1".into(), white: "me".into(), black: "x".into(),
+        moves: String::new(), status: "started".into(), wtime: 0, btime: 0,
+    });
+    app.handle_event(Event::GameState {
+        game_id: "g1".into(), moves: "f2f3 e7e5 g2g4 d8h4".into(), status: "mate".into(),
+        winner: None, wtime: 0, btime: 0, draw_offer: None,
+    });
+    let mut evals = vec![PlyEval::default(); 5];
+    evals[3].eval = Some(Eval::Mate(-1));
+    app.handle_event(Event::Analysis { game_id: "g1".into(), evals, from_lichess: false });
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    let s = screen(&mut app, 100, 44);
+    // queen still on d8 at ply 3
+    let rank8 = s.lines().find(|l| l.trim_start().starts_with("8 ")).unwrap().to_string();
+    assert!(rank8.contains('\u{265b}'), "{rank8}");
+    assert!(s.contains("#-1"), "{s}");
+    assert!(s.contains("3/4"), "{s}");
+}

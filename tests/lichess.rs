@@ -78,3 +78,51 @@ fn parses_now_playing_list() {
     assert_eq!(games[1].opponent, "AI level 2");
     assert!(!games[1].my_turn);
 }
+
+use terminal_chess::lichess::{parse_cloud_eval, parse_export_analysis, Eval};
+
+#[test]
+fn parses_export_with_lichess_analysis() {
+    let body = r#"{"id":"abc","moves":"e4 e5 Qh5","analysis":[{"eval":30},{"eval":25},{"eval":-40,"best":"g1f3","variation":"Nf3 Nc6","judgment":{"name":"Mistake","comment":"Mistake. Nf3 was best."}}]}"#;
+    let evals = parse_export_analysis(body).expect("analysis present");
+    assert_eq!(evals.len(), 3);
+    assert_eq!(evals[0].eval, Some(Eval::Cp(30)));
+    assert_eq!(evals[2].eval, Some(Eval::Cp(-40)));
+    assert_eq!(evals[2].best.as_deref(), Some("g1f3"));
+    assert_eq!(evals[2].judgment.as_deref(), Some("Mistake"));
+    assert!(evals[0].judgment.is_none());
+}
+
+#[test]
+fn export_without_analysis_is_none() {
+    assert!(parse_export_analysis(r#"{"id":"abc","moves":"e4 e5"}"#).is_none());
+    assert!(parse_export_analysis("garbage").is_none());
+}
+
+#[test]
+fn export_mate_scores() {
+    let body = r#"{"analysis":[{"mate":3},{"mate":-2}]}"#;
+    let evals = parse_export_analysis(body).unwrap();
+    assert_eq!(evals[0].eval, Some(Eval::Mate(3)));
+    assert_eq!(evals[1].eval, Some(Eval::Mate(-2)));
+}
+
+#[test]
+fn parses_cloud_eval() {
+    let body = r#"{"fen":"x","knodes":100,"depth":30,"pvs":[{"moves":"e2e4 c7c5","cp":24},{"moves":"d2d4","cp":20}]}"#;
+    let e = parse_cloud_eval(body).unwrap();
+    assert_eq!(e.eval, Some(Eval::Cp(24)));
+    assert_eq!(e.best.as_deref(), Some("e2e4"));
+    let mate = parse_cloud_eval(r#"{"pvs":[{"moves":"d8h4","mate":-1}]}"#).unwrap();
+    assert_eq!(mate.eval, Some(Eval::Mate(-1)));
+    assert!(parse_cloud_eval(r#"{"error":"Not found"}"#).is_none());
+}
+
+#[test]
+fn eval_formats_from_white_perspective() {
+    assert_eq!(Eval::Cp(80).to_string(), "+0.8");
+    assert_eq!(Eval::Cp(-125).to_string(), "-1.2");
+    assert_eq!(Eval::Cp(0).to_string(), "0.0");
+    assert_eq!(Eval::Mate(3).to_string(), "#3");
+    assert_eq!(Eval::Mate(-2).to_string(), "#-2");
+}

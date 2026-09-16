@@ -100,3 +100,34 @@ fn promotion_defaults_to_queen_for_coordinate_input() {
     assert_eq!(m.to_uci(), "b7a8q");
     assert_eq!(g.move_count(), 10);
 }
+
+#[test]
+fn position_at_replays_a_prefix_of_the_game() {
+    let mut g = Game::new();
+    g.set_moves("e2e4 e7e5 g1f3").unwrap();
+    let start = g.position_at(0);
+    assert_eq!(start.move_count(), 0);
+    assert_eq!(start.piece_char_at("e2".parse().unwrap()), Some('P'));
+    let one = g.position_at(1);
+    assert_eq!(one.move_count(), 1);
+    assert_eq!(one.turn(), Side::Black);
+    assert_eq!(one.piece_char_at("e4".parse().unwrap()), Some('P'));
+    let clamped = g.position_at(99);
+    assert_eq!(clamped.move_count(), 3);
+}
+
+#[test]
+fn fen_at_reports_the_position() {
+    let mut g = Game::new();
+    g.set_moves("e2e4").unwrap();
+    assert!(g.fen_at(0).starts_with("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w"));
+    assert!(g.fen_at(1).starts_with("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b"));
+}
+
+#[test]
+fn san_of_converts_uci_without_changing_the_game() {
+    let g = Game::new();
+    assert_eq!(g.san_of("g1f3"), Some("Nf3".to_string()));
+    assert_eq!(g.san_of("e2e5"), None);
+    assert_eq!(g.move_count(), 0);
+}

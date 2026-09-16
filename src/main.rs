@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use terminal_chess::app::{Action, App};
 use terminal_chess::config::Config;
-use terminal_chess::lichess::{Client, Event};
+use terminal_chess::lichess::{Client, Event, PlyEval};
 use terminal_chess::theme::ThemeKind;
 use terminal_chess::ui;
 
@@ -140,6 +140,7 @@ fn spawn_event_stream(client: Client, tx: mpsc::UnboundedSender<Event>) {
 async fn worker(client: Client, mut rx: mpsc::UnboundedReceiver<Action>, tx: mpsc::UnboundedSender<Event>) {
     let mut game_task: Option<(String, JoinHandle<()>)> = None;
     let mut seek_task: Option<JoinHandle<()>> = None;
+    let mut analysis_task: Option<JoinHandle<()>> = None;
 
     while let Some(action) = rx.recv().await {
         match action {
@@ -235,6 +236,60 @@ async fn worker(client: Client, mut rx: mpsc::UnboundedReceiver<Action>, tx: mps
                     }
                 });
             }
+            Action::FetchAnalysis { game_id, fens } => {
+                if let Some(h) = analysis_task.take() {
+                    h.abort();
+                }
+                let c = client.clone();
+                let t = tx.clone();
+                analysis_task = Some(tokio::spawn(async move {
+                    match fetch_analysis(&c, &game_id, &fens).await {
+                        Ok((evals, from_lichess)) => {
+                            let _ = t.send(Event::Analysis { game_id, evals, from_lichess });
+                        }
+                        Err(e) => {
+                            let _ = t.send(Event::Error(format!("analysis failed: {e}")));
+                        }
+                    }
+                }));
+            }
+            Action::OpenBrowser(url) => {
+                if let Err(e) = open_browser(&url) {
+                    let _ = tx.send(Event::Error(format!("could not open browser: {e}")));
+                }
+            }
         }
     }
+}
+
+/// Server analysis when Lichess has it, otherwise cloud evals position by position.
+/// Returns one entry per fen and whether the data came with Lichess judgments.
+async fn fetch_analysis(client: &Client, game_id: &str, fens: &[String]) -> Result<(Vec<PlyEval>, bool)> {
+    if let Some(list) = client.export_analysis(game_id).await? {
+        // Lichess entries describe the position after each move; index 0 is the start.
+        let mut evals = vec![PlyEval::default()];
+        evals.extend(list);
+        evals.resize(fens.len().max(evals.len()), PlyEval::default());
+        return Ok((evals, true));
+    }
+    let mut evals = Vec::with_capacity(fens.len());
+    for fen in fens {
+        let e = client.cloud_eval(fen).await.unwrap_or(None).unwrap_or_default();
+        evals.push(e);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    Ok((evals, false))
+}
+
+fn open_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd").args(["/C", "start", "", url]).status()?;
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg(url).status()?;
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open").arg(url).status()?;
+    if !status.success() {
+        anyhow::bail!("launcher exited with {status}");
+    }
+    Ok(())
 }

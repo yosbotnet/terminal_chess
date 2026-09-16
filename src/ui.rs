@@ -128,21 +128,31 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 fn board_block(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let dim = Style::default().fg(theme.dim);
     let view = app.view();
+    let shown = app.board_game();
+    // In review the detail line carries the ply, the move, and the evaluation.
+    let note = match app.review_ply() {
+        Some(ply) => {
+            let san = shown.san_history().last().cloned().unwrap_or_else(|| "start".into());
+            let eval = app.current_eval().map(|e| format!("  {e}")).unwrap_or_default();
+            format!("  ({ply}/{} {san}{eval})", app.game().move_count())
+        }
+        None => String::new(),
+    };
     let mut lines = Vec::new();
     if app.camouflage() {
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", theme.tool_bullet), Style::default().fg(theme.good)),
             Span::styled("Read(tests/fixtures/position.txt)", Style::default().add_modifier(Modifier::BOLD)),
         ]));
-        lines.push(Line::from(Span::styled("  \u{23bf}  Read 8 lines", dim)));
-        lines.extend(camo::render(app.game(), &view, theme));
+        lines.push(Line::from(Span::styled(format!("  \u{23bf}  Read 8 lines{note}"), dim)));
+        lines.extend(camo::render(&shown, &view, theme));
     } else {
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", theme.tool_bullet), Style::default().fg(theme.good)),
             Span::styled("Bash(cargo run --release -- --render)", Style::default().add_modifier(Modifier::BOLD)),
         ]));
-        lines.push(Line::from(Span::styled("  \u{23bf}  ", dim)));
-        lines.extend(board::render(app.game(), &view, theme));
+        lines.push(Line::from(Span::styled(format!("  \u{23bf}{note}"), dim)));
+        lines.extend(board::render(&shown, &view, theme));
     }
     lines.push(Line::raw(""));
     lines

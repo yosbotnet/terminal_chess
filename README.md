@@ -50,11 +50,34 @@ Commands:
 | `/seek 15+10` | seek a human, realtime |
 | `/seek corr 2` | seek a human, correspondence with 2 days per move (default for bare `/seek`) |
 | `/resign`, `/draw` | resign or offer/accept a draw |
+| `/review` | step through the current game with evaluations (automatic when a game ends) |
+| `/analyze` | open the game on lichess.org in your browser |
 | `/flip`, `/hide`, `/theme`, `/help`, `/quit` | as named |
 
 Every move you make shows up in the transcript as a fake `Edit(...)` tool
 call; the opponent's moves show as `Read(...)`. The move itself is in the dim
 detail line, in parentheses.
+
+## After the game
+
+When a game ends the app drops into review at the final position. Left and
+Right step one move, Up and Down jump to the start or end, Esc returns to the
+live view. The footer shows the ply and the evaluation.
+
+Evaluations come from Lichess. If the game has server analysis (you or your
+opponent requested it on lichess.org), every move gets an eval and Lichess's
+own blunder / mistake / inaccuracy verdicts with the best move. Otherwise the
+app asks Lichess's cloud eval for each position, which covers openings and
+well-known positions, and derives verdicts from the swings it can see. The
+result is printed as fake `cargo clippy` warnings:
+
+```
+warning: blunder in your move 2. g4??, best was Nh3
+  --> src/board/movegen.rs:3:4
+```
+
+For a full engine analysis, `/analyze` opens the game in the browser, click
+"Request a computer analysis" there, then run `/review` again.
 
 ## Development
 

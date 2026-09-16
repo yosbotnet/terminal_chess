@@ -49,6 +49,47 @@ pub enum Event {
     StreamEnded {
         game_id: String,
     },
+    /// Evaluations for a finished game. `evals[i]` is the position after `i` half-moves.
+    /// `from_lichess` is true when the game had server-side analysis with judgments.
+    Analysis {
+        game_id: String,
+        evals: Vec<PlyEval>,
+        from_lichess: bool,
+    },
+}
+
+/// Engine evaluation from White's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Eval {
+    /// Centipawns.
+    Cp(i32),
+    /// Mate in N moves; negative means Black mates.
+    Mate(i32),
+}
+
+impl std::fmt::Display for Eval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Eval::Cp(cp) => {
+                let pawns = cp as f64 / 100.0;
+                if cp > 0 {
+                    write!(f, "+{pawns:.1}")
+                } else {
+                    write!(f, "{pawns:.1}")
+                }
+            }
+            Eval::Mate(n) => write!(f, "#{n}"),
+        }
+    }
+}
+
+/// Evaluation attached to one position, plus what Lichess said about the move
+/// that led to it (only when the game was analysed on Lichess).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PlyEval {
+    pub eval: Option<Eval>,
+    pub best: Option<String>,
+    pub judgment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +187,52 @@ pub fn parse_game_line(game_id: &str, line: &str) -> Option<Event> {
         }),
         _ => None,
     }
+}
+
+fn eval_from(v: &Value) -> Option<Eval> {
+    if let Some(m) = v.get("mate").and_then(Value::as_i64) {
+        return Some(Eval::Mate(m as i32));
+    }
+    v.get("eval")
+        .or_else(|| v.get("cp"))
+        .and_then(Value::as_i64)
+        .map(|cp| Eval::Cp(cp as i32))
+}
+
+/// Body of /game/export/{id}?evals=true as JSON. `None` when the game has no
+/// server analysis. Entry `i` describes the position after move `i + 1`.
+pub fn parse_export_analysis(body: &str) -> Option<Vec<PlyEval>> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let list = v.get("analysis")?.as_array()?;
+    Some(
+        list.iter()
+            .map(|e| PlyEval {
+                eval: eval_from(e),
+                best: e.get("best").and_then(Value::as_str).map(String::from),
+                judgment: e
+                    .get("judgment")
+                    .and_then(|j| j.get("name"))
+                    .and_then(Value::as_str)
+                    .map(String::from),
+            })
+            .collect(),
+    )
+}
+
+/// Body of /api/cloud-eval. `None` when the position is not in the cloud.
+pub fn parse_cloud_eval(body: &str) -> Option<PlyEval> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let pv = v.get("pvs")?.as_array()?.first()?;
+    let best = pv
+        .get("moves")
+        .and_then(Value::as_str)
+        .and_then(|m| m.split_whitespace().next())
+        .map(String::from);
+    Some(PlyEval {
+        eval: eval_from(pv),
+        best,
+        judgment: None,
+    })
 }
 
 /// Body of /api/account/playing.
@@ -253,6 +340,32 @@ impl Client {
             chunk?;
         }
         Ok(())
+    }
+
+    /// Server analysis for a finished game, if Lichess has analysed it.
+    pub async fn export_analysis(&self, game_id: &str) -> Result<Option<Vec<PlyEval>>> {
+        let resp = Self::check(
+            self.get(&format!("/game/export/{game_id}?evals=true&clocks=false"))
+                .header("Accept", "application/json")
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(parse_export_analysis(&resp.text().await?))
+    }
+
+    /// Cloud evaluation for one position. `None` when unknown to the cloud.
+    pub async fn cloud_eval(&self, fen: &str) -> Result<Option<PlyEval>> {
+        let resp = self
+            .get("/api/cloud-eval")
+            .query(&[("fen", fen), ("multiPv", "1")])
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let resp = Self::check(resp).await?;
+        Ok(parse_cloud_eval(&resp.text().await?))
     }
 
     pub async fn make_move(&self, game_id: &str, uci: &str) -> Result<()> {

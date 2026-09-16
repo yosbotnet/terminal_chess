@@ -4,7 +4,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use terminal_chess::app::App;
-use terminal_chess::lichess::Event;
+use terminal_chess::lichess::{Eval, Event, PlyEval};
 use terminal_chess::theme::ThemeKind;
 use terminal_chess::ui;
 
@@ -46,4 +46,38 @@ fn main() {
         dump(&mut app, 90, 30);
         println!();
     }
+
+    // Review mode after a lost game, with cloud evals only.
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::GameFull {
+        game_id: "g1".into(),
+        white: "me".into(),
+        black: "Stockfish level 3".into(),
+        moves: String::new(),
+        status: "started".into(),
+        wtime: 0,
+        btime: 0,
+    });
+    app.handle_event(Event::GameState {
+        game_id: "g1".into(),
+        moves: "f2f3 e7e5 g2g4 d8h4".into(),
+        status: "mate".into(),
+        winner: None,
+        wtime: 0,
+        btime: 0,
+        draw_offer: None,
+    });
+    let mut evals = vec![PlyEval::default(); 5];
+    evals[0].eval = Some(Eval::Cp(20));
+    evals[1].eval = Some(Eval::Cp(-60));
+    evals[2].eval = Some(Eval::Cp(-70));
+    evals[3] = PlyEval { eval: Some(Eval::Mate(-1)), best: Some("g1h3".into()), judgment: None };
+    evals[4].eval = Some(Eval::Mate(0));
+    app.handle_event(Event::Analysis { game_id: "g1".into(), evals, from_lichess: false });
+    app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Left,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    println!("==== Claude review ====");
+    dump(&mut app, 90, 40);
 }

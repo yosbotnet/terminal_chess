@@ -15,6 +15,8 @@ pub enum Command {
     Camouflage,
     Help,
     Quit,
+    Review,
+    Analyze,
     Error(String),
 }
 
@@ -44,6 +46,8 @@ pub fn parse(input: &str) -> Command {
         "/hide" => Command::Camouflage,
         "/help" => Command::Help,
         "/quit" | "/exit" => Command::Quit,
+        "/review" => Command::Review,
+        "/analyze" | "/analyse" => Command::Analyze,
         other => Command::Error(format!("unknown command: {other}")),
     }
 }

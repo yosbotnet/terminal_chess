@@ -50,3 +50,10 @@ fn switch_game_by_index_or_id() {
 fn unknown_command_is_error() {
     assert_eq!(parse("/bogus"), Command::Error("unknown command: /bogus".into()));
 }
+
+#[test]
+fn review_and_analyze_commands() {
+    assert_eq!(parse("/review"), Command::Review);
+    assert_eq!(parse("/analyze"), Command::Analyze);
+    assert_eq!(parse("/analyse"), Command::Analyze);
+}

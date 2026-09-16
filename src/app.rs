@@ -6,7 +6,7 @@ use shakmaty::{File, Rank, Square};
 
 use crate::commands::{self, Command};
 use crate::game::{Game, Outcome, Side};
-use crate::lichess::{Event, PlayingGame};
+use crate::lichess::{Eval, Event, PlayingGame, PlyEval};
 use crate::render::BoardView;
 use crate::theme::{Theme, ThemeKind};
 
@@ -20,6 +20,9 @@ pub enum Action {
     OpenGame(String),
     Resign(String),
     Draw(String),
+    /// Evaluate every position of a game. `fens[i]` is the position after `i` half-moves.
+    FetchAnalysis { game_id: String, fens: Vec<String> },
+    OpenBrowser(String),
 }
 
 /// One entry of the fake agent transcript.
@@ -47,6 +50,34 @@ const FILES: &[&str] = &[
     "src/main.rs",
 ];
 
+/// Winning chances in [-1, 1] from White's view, the same curve Lichess uses.
+fn winning_chances(e: Eval) -> f64 {
+    match e {
+        Eval::Cp(cp) => 2.0 / (1.0 + (-0.003_682_08 * cp as f64).exp()) - 1.0,
+        Eval::Mate(n) if n > 0 => 1.0,
+        Eval::Mate(_) => -1.0,
+    }
+}
+
+/// Judge the move that took the position from `before` to `after`, played by `mover`.
+/// Thresholds follow Lichess: 0.3 blunder, 0.2 mistake, 0.1 inaccuracy.
+pub fn judge(before: Eval, after: Eval, mover: Side) -> Option<&'static str> {
+    if after == Eval::Mate(0) {
+        return None; // the mover delivered mate
+    }
+    let sign = if mover == Side::White { 1.0 } else { -1.0 };
+    let drop = (winning_chances(before) - winning_chances(after)) * sign;
+    if drop >= 0.3 {
+        Some("Blunder")
+    } else if drop >= 0.2 {
+        Some("Mistake")
+    } else if drop >= 0.1 {
+        Some("Inaccuracy")
+    } else {
+        None
+    }
+}
+
 pub struct App {
     theme: Theme,
     camouflage: bool,
@@ -65,7 +96,10 @@ pub struct App {
     playing: Vec<PlayingGame>,
     actions: Vec<Action>,
     should_quit: bool,
-    ctrl_c_armed: bool,
+    /// Ply being looked at in review mode, if any.
+    review: Option<usize>,
+    /// `evals[i]` is the evaluation after `i` half-moves. Empty until analysis arrives.
+    evals: Vec<PlyEval>,
     pub wtime: u64,
     pub btime: u64,
 }
@@ -90,7 +124,8 @@ impl App {
             playing: Vec::new(),
             actions: Vec::new(),
             should_quit: false,
-            ctrl_c_armed: false,
+            review: None,
+            evals: Vec::new(),
             wtime: 0,
             btime: 0,
         };
@@ -108,8 +143,16 @@ impl App {
     pub fn camouflage(&self) -> bool {
         self.camouflage
     }
+    /// The live game.
     pub fn game(&self) -> &Game {
         &self.game
+    }
+    /// The game as it should be drawn: a past position in review, else the live one.
+    pub fn board_game(&self) -> Game {
+        match self.review {
+            Some(ply) => self.game.position_at(ply),
+            None => self.game.clone(),
+        }
     }
     pub fn game_id(&self) -> Option<&str> {
         self.game_id.as_deref()
@@ -135,31 +178,56 @@ impl App {
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
+    pub fn review_ply(&self) -> Option<usize> {
+        self.review
+    }
+    pub fn current_eval(&self) -> Option<Eval> {
+        let ply = self.review.unwrap_or(self.game.move_count());
+        self.evals.get(ply).and_then(|e| e.eval)
+    }
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
     }
 
     pub fn view(&self) -> BoardView {
-        let check_square = if self.game.in_check() {
-            self.game.king_square(self.game.turn())
+        let shown = self.board_game();
+        let check_square = if shown.in_check() {
+            shown.king_square(shown.turn())
         } else {
             None
         };
+        let last_move = shown
+            .last_move()
+            .and_then(|m| m.from_square().map(|f| (f, m.to_square())));
+        if self.review.is_some() {
+            return BoardView {
+                flipped: self.flipped,
+                cursor: None,
+                selected: None,
+                targets: Vec::new(),
+                last_move,
+                check_square,
+            };
+        }
         BoardView {
             flipped: self.flipped,
             cursor: Some(self.cursor),
             selected: self.selected,
             targets: self.targets.clone(),
-            last_move: self
-                .game
-                .last_move()
-                .and_then(|m| m.from_square().map(|f| (f, m.to_square()))),
+            last_move,
             check_square,
         }
     }
 
     /// Short human status for the footer.
     pub fn status_line(&self) -> String {
+        if let Some(ply) = self.review {
+            let eval = self
+                .current_eval()
+                .map(|e| format!(" | {e}"))
+                .unwrap_or_default();
+            return format!("review | move {}/{}{}", ply, self.game.move_count(), eval);
+        }
         match (&self.game_id, self.my_side) {
             (Some(_), Some(side)) => {
                 let turn = if self.game.turn() == side { "your move" } else { "waiting" };
@@ -179,7 +247,10 @@ impl App {
     }
 
     fn my_turn(&self) -> bool {
-        self.game_id.is_some() && self.my_side == Some(self.game.turn()) && !self.is_over()
+        self.game_id.is_some()
+            && self.my_side == Some(self.game.turn())
+            && !self.is_over()
+            && self.review.is_none()
     }
 
     fn push(&mut self, e: Entry) {
@@ -198,22 +269,20 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('c') => {
-                    self.should_quit = true;
-                }
+                KeyCode::Char('c') => self.should_quit = true,
                 KeyCode::Char('t') => self.cycle_theme(),
                 KeyCode::Char('u') => self.input.clear(),
                 _ => {}
             }
             return;
         }
-        self.ctrl_c_armed = false;
         match key.code {
             KeyCode::Tab => self.camouflage = !self.camouflage,
             KeyCode::Esc => {
                 self.selected = None;
                 self.targets.clear();
                 self.input.clear();
+                self.review = None;
             }
             KeyCode::Enter => {
                 if self.input.trim().is_empty() {
@@ -226,17 +295,17 @@ impl App {
             KeyCode::Backspace => {
                 self.input.pop();
             }
-            KeyCode::Up => self.move_cursor(0, 1),
-            KeyCode::Down => self.move_cursor(0, -1),
-            KeyCode::Left => self.move_cursor(-1, 0),
-            KeyCode::Right => self.move_cursor(1, 0),
+            KeyCode::Up => self.nav(0, 1),
+            KeyCode::Down => self.nav(0, -1),
+            KeyCode::Left => self.nav(-1, 0),
+            KeyCode::Right => self.nav(1, 0),
             KeyCode::Char(c) => {
                 if self.input.is_empty() {
                     match c {
-                        'k' => return self.move_cursor(0, 1),
-                        'j' => return self.move_cursor(0, -1),
-                        'h' => return self.move_cursor(-1, 0),
-                        'l' => return self.move_cursor(1, 0),
+                        'k' => return self.nav(0, 1),
+                        'j' => return self.nav(0, -1),
+                        'h' => return self.nav(-1, 0),
+                        'l' => return self.nav(1, 0),
                         ' ' => return self.cursor_action(),
                         _ => {}
                     }
@@ -245,6 +314,21 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Directional input: steps through the game in review, moves the cursor otherwise.
+    fn nav(&mut self, dx: i32, dy: i32) {
+        if let Some(ply) = self.review {
+            let last = self.game.move_count();
+            self.review = Some(match (dx, dy) {
+                (-1, _) => ply.saturating_sub(1),
+                (1, _) => (ply + 1).min(last),
+                (_, 1) => 0,
+                _ => last,
+            });
+            return;
+        }
+        self.move_cursor(dx, dy);
     }
 
     /// `dx`/`dy` are screen directions: +x right, +y up.
@@ -357,12 +441,38 @@ impl App {
             Command::Camouflage => self.camouflage = !self.camouflage,
             Command::Help => self.push(Entry::Text(HELP.trim().to_string())),
             Command::Quit => self.should_quit = true,
+            Command::Review => {
+                if self.game_id.is_none() || self.game.move_count() == 0 {
+                    self.push(Entry::Error("nothing to review yet".into()));
+                } else {
+                    self.push(Entry::Text("Stepping through the changes. Left/Right to move, Esc to stop.".into()));
+                    self.enter_review();
+                }
+            }
+            Command::Analyze => match self.game_id.clone() {
+                Some(id) => {
+                    self.push(Entry::Text("Opening the full report in the browser.".into()));
+                    self.actions.push(Action::OpenBrowser(format!("https://lichess.org/{id}")));
+                }
+                None => self.push(Entry::Error("no game to analyze".into())),
+            },
             Command::Error(e) => self.push(Entry::Error(e)),
         }
     }
 
     fn cycle_theme(&mut self) {
         self.theme = Theme::get(self.theme.kind.next());
+    }
+
+    /// Jump to the final position in review and ask the worker for evaluations.
+    fn enter_review(&mut self) {
+        let Some(id) = self.game_id.clone() else { return };
+        let n = self.game.move_count();
+        self.review = Some(n);
+        self.selected = None;
+        self.targets.clear();
+        let fens = (0..=n).map(|p| self.game.fen_at(p)).collect();
+        self.actions.push(Action::FetchAnalysis { game_id: id, fens });
     }
 
     // ----- lichess events -----
@@ -393,6 +503,8 @@ impl App {
                 self.cursor = if side == Side::White { Square::E2 } else { Square::E7 };
                 self.selected = None;
                 self.targets.clear();
+                self.review = None;
+                self.evals.clear();
                 self.status = status.clone();
                 self.wtime = wtime;
                 self.btime = btime;
@@ -429,7 +541,7 @@ impl App {
                             title: format!("Read({file})"),
                             detail: format!("Read {} lines ({san})", 12 + after * 3),
                         });
-                        if self.game.in_check() {
+                        if self.game.in_check() && self.game.outcome().is_none() {
                             self.push(Entry::Text("Heads up: the current branch fails a check.".into()));
                         }
                     }
@@ -469,6 +581,13 @@ impl App {
                     self.push(Entry::Text("Connection to the session dropped. /game to reopen.".into()));
                 }
             }
+            Event::Analysis { game_id, evals, from_lichess } => {
+                if self.game_id.as_deref() != Some(&game_id) {
+                    return;
+                }
+                self.evals = evals;
+                self.report_analysis(from_lichess);
+            }
         }
     }
 
@@ -492,10 +611,92 @@ impl App {
             _ if status == "aborted" => "aborted",
             _ => "drawn",
         };
-        self.push(Entry::Text(format!(
-            "Done. Summary: {verdict} {how} against {}.",
-            self.opponent
-        ).replace("  ", " ")));
+        let mut text = format!("Done. Summary: {verdict} {how} against {}.", self.opponent).replace("  ", " ");
+        if self.game.move_count() > 0 && status != "aborted" {
+            text.push_str(" Reviewing the changes now: Left/Right to step, Esc to stop, /analyze for the full report.");
+            self.push(Entry::Text(text));
+            self.enter_review();
+        } else {
+            self.push(Entry::Text(text));
+        }
+    }
+
+    /// Summarise the evaluations as if a linter had run over the game.
+    fn report_analysis(&mut self, from_lichess: bool) {
+        let n = self.game.move_count();
+        let evaluated = self.evals.iter().filter(|e| e.eval.is_some()).count();
+        if evaluated == 0 {
+            self.push(Entry::Text(
+                "No evaluations are available for this game yet. /analyze opens the Lichess page where you can request computer analysis, then run /review again.".into(),
+            ));
+            return;
+        }
+        let sans = self.game.san_history();
+        let mut warnings: Vec<String> = Vec::new();
+        let mut counts = [0usize; 3];
+        for ply in 1..=n {
+            let mover = if ply % 2 == 1 { Side::White } else { Side::Black };
+            let entry = self.evals.get(ply);
+            let name: Option<String> = if from_lichess {
+                entry.and_then(|e| e.judgment.clone())
+            } else {
+                let before = self.evals.get(ply - 1).and_then(|e| e.eval);
+                let after = entry.and_then(|e| e.eval);
+                match (before, after) {
+                    (Some(b), Some(a)) => judge(b, a, mover).map(String::from),
+                    _ => None,
+                }
+            };
+            let Some(name) = name else { continue };
+            let lower = name.to_ascii_lowercase();
+            let (mark, slot) = match lower.as_str() {
+                "blunder" => ("??", 0),
+                "mistake" => ("?", 1),
+                _ => ("?!", 2),
+            };
+            counts[slot] += 1;
+            let number = if mover == Side::White {
+                format!("{}.", ply.div_ceil(2))
+            } else {
+                format!("{}...", ply / 2)
+            };
+            let san = sans.get(ply - 1).cloned().unwrap_or_default();
+            let best = entry
+                .and_then(|e| e.best.as_deref())
+                .and_then(|uci| self.game.position_at(ply - 1).san_of(uci))
+                .map(|s| format!(", best was {s}"))
+                .unwrap_or_default();
+            let whose = if Some(mover) == self.my_side { "your" } else { "their" };
+            warnings.push(format!(
+                "warning: {lower} in {whose} move {number} {san}{mark}{best}\n  --> {}:{}:{}",
+                FILES[ply % FILES.len()],
+                ply,
+                ply % 7 + 1
+            ));
+        }
+        self.push(Entry::Tool {
+            title: "Bash(cargo clippy --all-targets)".into(),
+            detail: format!(
+                "{} positions evaluated{}",
+                evaluated,
+                if from_lichess { " (server analysis)" } else { " (cloud, partial)" }
+            ),
+        });
+        let mut text = format!(
+            "{} blunder{}, {} mistake{}, {} inaccurac{} in {} moves.",
+            counts[0],
+            if counts[0] == 1 { "" } else { "s" },
+            counts[1],
+            if counts[1] == 1 { "" } else { "s" },
+            counts[2],
+            if counts[2] == 1 { "y" } else { "ies" },
+            n
+        );
+        for w in &warnings {
+            text.push('\n');
+            text.push_str(w);
+        }
+        self.push(Entry::Text(text));
     }
 }
 
@@ -504,4 +705,5 @@ Keys: arrows or hjkl move the cursor, Enter/Space selects and moves, Esc cancels
 Tab hides the board as file output, Ctrl+T switches theme, Ctrl+C quits.
 Type moves as e2 e4, e2e4, or Nf3. Commands: /games, /game N, /new ai 1-8,
 /seek 15+10, /seek corr 2, /resign, /draw, /flip, /hide, /theme, /quit.
+After a game: Left/Right step through it, /review restarts that, /analyze opens Lichess.
 ";

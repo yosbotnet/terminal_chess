@@ -245,3 +245,154 @@ fn moves_show_as_fake_tool_calls() {
         other => panic!("expected tool entry, got {other:?}"),
     }
 }
+
+// ----- review mode -----
+
+use terminal_chess::app::judge;
+use terminal_chess::lichess::{Eval, PlyEval};
+
+fn finished_app() -> App {
+    let mut app = app_in_game(Side::White);
+    app.handle_event(Event::GameState {
+        game_id: "g1".into(),
+        moves: "f2f3 e7e5 g2g4 d8h4".into(),
+        status: "mate".into(),
+        winner: Some(Side::Black),
+        wtime: 0,
+        btime: 0,
+        draw_offer: None,
+    });
+    app
+}
+
+#[test]
+fn game_over_enters_review_and_requests_analysis() {
+    let mut app = finished_app();
+    assert_eq!(app.review_ply(), Some(4));
+    let actions = app.take_actions();
+    match &actions[..] {
+        [Action::FetchAnalysis { game_id, fens }] => {
+            assert_eq!(game_id, "g1");
+            assert_eq!(fens.len(), 5);
+            assert!(fens[0].starts_with("rnbqkbnr/pppppppp"));
+        }
+        other => panic!("unexpected actions {other:?}"),
+    }
+}
+
+#[test]
+fn review_keys_step_through_positions() {
+    let mut app = finished_app();
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.review_ply(), Some(3));
+    assert_eq!(app.board_game().move_count(), 3);
+    app.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(app.review_ply(), Some(2));
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.review_ply(), Some(0));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.review_ply(), Some(0));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.review_ply(), Some(4));
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.review_ply(), Some(4));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.review_ply(), None);
+    assert_eq!(app.board_game().move_count(), 4);
+}
+
+#[test]
+fn review_view_highlights_the_move_at_that_ply() {
+    let mut app = finished_app();
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.view().last_move.map(|(f, t)| format!("{f}{t}")), Some("g2g4".into()));
+    assert!(app.view().cursor.is_none());
+}
+
+#[test]
+fn analysis_event_shows_warnings_like_a_linter() {
+    let mut app = finished_app();
+    app.take_actions();
+    let mut evals = vec![PlyEval::default(); 5];
+    evals[1].eval = Some(Eval::Cp(-20));
+    evals[3] = PlyEval { eval: Some(Eval::Mate(-1)), best: Some("g1h3".into()), judgment: Some("Blunder".into()) };
+    evals[4].eval = Some(Eval::Mate(0));
+    app.handle_event(Event::Analysis { game_id: "g1".into(), evals, from_lichess: true });
+    let text = app
+        .transcript()
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    assert!(text.contains("warning"), "{text}");
+    assert!(text.contains("g4"), "{text}");
+    assert!(text.to_lowercase().contains("blunder"), "{text}");
+    assert!(text.contains("Nh3"), "best move should be shown as SAN: {text}");
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.current_eval(), Some(Eval::Mate(-1)));
+}
+
+#[test]
+fn analysis_without_judgments_derives_them_from_swings() {
+    let mut app = finished_app();
+    app.take_actions();
+    let mut evals = vec![PlyEval::default(); 5];
+    evals[0].eval = Some(Eval::Cp(20));
+    evals[1].eval = Some(Eval::Cp(-40));
+    evals[2].eval = Some(Eval::Cp(-50));
+    evals[3].eval = Some(Eval::Cp(-900));
+    evals[4].eval = Some(Eval::Mate(0));
+    app.handle_event(Event::Analysis { game_id: "g1".into(), evals, from_lichess: false });
+    let text = app
+        .transcript()
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    assert!(text.to_lowercase().contains("blunder"), "{text}");
+    assert!(text.contains("g4"), "{text}");
+}
+
+#[test]
+fn judge_uses_the_movers_perspective() {
+    assert_eq!(judge(Eval::Cp(50), Eval::Cp(-250), Side::White), Some("Blunder"));
+    assert_eq!(judge(Eval::Cp(-30), Eval::Cp(-150), Side::White), Some("Mistake"));
+    assert_eq!(judge(Eval::Cp(0), Eval::Cp(-60), Side::White), Some("Inaccuracy"));
+    assert_eq!(judge(Eval::Cp(0), Eval::Cp(-20), Side::White), None);
+    assert_eq!(judge(Eval::Cp(0), Eval::Cp(80), Side::White), None);
+    assert_eq!(judge(Eval::Cp(-100), Eval::Cp(200), Side::Black), Some("Blunder"));
+    assert_eq!(judge(Eval::Cp(100), Eval::Mate(2), Side::Black), Some("Blunder"));
+    assert_eq!(judge(Eval::Mate(-3), Eval::Cp(-900), Side::Black), None);
+}
+
+#[test]
+fn analyze_command_opens_the_lichess_page() {
+    let mut app = finished_app();
+    app.take_actions();
+    type_str(&mut app, "/analyze");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.take_actions(), vec![Action::OpenBrowser("https://lichess.org/g1".into())]);
+}
+
+#[test]
+fn review_command_needs_a_game() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    type_str(&mut app, "/review");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.take_actions().is_empty());
+    assert!(matches!(app.transcript().last(), Some(Entry::Error(_))));
+}
+
+#[test]
+fn review_status_line_shows_progress() {
+    let mut app = finished_app();
+    app.handle_key(key(KeyCode::Left));
+    assert!(app.status_line().contains("review"), "{}", app.status_line());
+    assert!(app.status_line().contains("3/4"), "{}", app.status_line());
+}

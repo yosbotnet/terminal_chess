@@ -1,9 +1,10 @@
 //! Chess position state built on shakmaty. Knows nothing about Lichess or the UI.
 
 use anyhow::{anyhow, bail, Result};
+use shakmaty::fen::Fen;
 use shakmaty::san::{San, SanPlus};
 use shakmaty::uci::UciMove;
-use shakmaty::{CastlingMode, Chess, Color, Move, Position, Role, Square};
+use shakmaty::{CastlingMode, Chess, Color, EnPassantMode, Move, Position, Role, Square};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -134,6 +135,22 @@ impl Game {
             .collect()
     }
 
+    /// The game as it stood after `ply` half-moves (clamped to the full game).
+    pub fn position_at(&self, ply: usize) -> Game {
+        let ply = ply.min(self.history.len());
+        let mut g = Game::new();
+        for m in &self.history[..ply] {
+            g.play(m);
+        }
+        g
+    }
+
+    /// FEN of the position after `ply` half-moves.
+    pub fn fen_at(&self, ply: usize) -> String {
+        let g = self.position_at(ply);
+        Fen::from_position(g.pos, EnPassantMode::Legal).to_string()
+    }
+
     /// Replace the whole game with the given space-separated UCI move list.
     pub fn set_moves(&mut self, moves: &str) -> Result<()> {
         let mut fresh = Game::new();
@@ -182,6 +199,14 @@ impl Game {
             .to_move(&self.pos)
             .map_err(|_| anyhow!("illegal move: {text}"))?;
         Ok(self.wrap(m))
+    }
+
+    /// SAN for a UCI move in the current position, without playing it.
+    pub fn san_of(&self, uci: &str) -> Option<String> {
+        let m = self.parse_uci(uci).ok()?;
+        let mut g = self.clone();
+        g.play(&m);
+        g.san_history.pop()
     }
 
     /// Try to read `from`/`to` squares for the cursor and the coordinate prompt.
