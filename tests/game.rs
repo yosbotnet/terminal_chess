@@ -131,3 +131,31 @@ fn san_of_converts_uci_without_changing_the_game() {
     assert_eq!(g.san_of("e2e5"), None);
     assert_eq!(g.move_count(), 0);
 }
+
+#[test]
+fn set_san_moves_loads_a_pgn_move_list() {
+    let mut g = Game::new();
+    g.set_san_moves("e4 e5 Nf3 Nc6 Bb5").unwrap();
+    assert_eq!(g.move_count(), 5);
+    assert_eq!(g.turn(), Side::Black);
+    assert_eq!(g.piece_char_at("b5".parse().unwrap()), Some('B'));
+    assert!(Game::new().set_san_moves("e4 e4").is_err());
+}
+
+#[test]
+fn pgn_has_headers_numbered_moves_and_result() {
+    let mut g = Game::new();
+    g.set_moves("f2f3 e7e5 g2g4 d8h4").unwrap();
+    let pgn = g.pgn(&[("White", "me"), ("Black", "Stockfish level 3")], "0-1");
+    assert!(pgn.starts_with("[White \"me\"]\n[Black \"Stockfish level 3\"]\n[Result \"0-1\"]\n\n"), "{pgn}");
+    assert!(pgn.ends_with("1. f3 e5 2. g4 Qh4# 0-1\n"), "{pgn}");
+}
+
+#[test]
+fn pgn_wraps_long_move_lists() {
+    let mut g = Game::new();
+    g.set_san_moves("e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7 Re1 b5 Bb3 d6 c3 O-O h3 Nb8 d4 Nbd7 c4 c6 cxb5 axb5 Nc3 Bb7").unwrap();
+    let pgn = g.pgn(&[], "*");
+    assert!(pgn.lines().all(|l| l.len() <= 80), "{pgn}");
+    assert!(pgn.contains("13. Nc3 Bb7 *"), "{pgn}");
+}

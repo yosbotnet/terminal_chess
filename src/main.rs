@@ -2,8 +2,9 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
+use crossterm::event::{DisableFocusChange, EnableFocusChange, Event as TermEvent, EventStream, KeyEventKind};
 use crossterm::execute;
+use crossterm::style::Print;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
@@ -37,7 +38,7 @@ async fn main() -> Result<()> {
     let app = App::new(theme, cfg.camouflage, username);
 
     let mut terminal = setup_terminal()?;
-    let result = run(&mut terminal, app, client).await;
+    let result = run(&mut terminal, app, client, cfg.notify.clone()).await;
     restore_terminal(&mut terminal)?;
     result
 }
@@ -62,7 +63,7 @@ fn print_setup_help() {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("entering alternate screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableFocusChange).context("entering alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend).context("creating terminal")?;
     Ok(terminal)
@@ -70,7 +71,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableFocusChange, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     io::stdout().flush()?;
     Ok(())
@@ -80,6 +81,7 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut app: App,
     client: Client,
+    notify: String,
 ) -> Result<()> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Event>();
     let (act_tx, act_rx) = mpsc::unbounded_channel::<Action>();
@@ -97,6 +99,8 @@ async fn run(
             maybe = keys.next() => {
                 match maybe {
                     Some(Ok(TermEvent::Key(k))) if k.kind != KeyEventKind::Release => app.handle_key(k),
+                    Some(Ok(TermEvent::FocusGained)) => app.set_focused(true),
+                    Some(Ok(TermEvent::FocusLost)) => app.set_focused(false),
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => break,
@@ -106,7 +110,12 @@ async fn run(
             _ = tick.tick() => {}
         }
         for a in app.take_actions() {
-            let _ = act_tx.send(a);
+            match a {
+                Action::Notify { title, body } => notify_user(terminal, &notify, &title, &body),
+                other => {
+                    let _ = act_tx.send(other);
+                }
+            }
         }
         if app.should_quit() {
             break;
@@ -258,7 +267,82 @@ async fn worker(client: Client, mut rx: mpsc::UnboundedReceiver<Action>, tx: mps
                     let _ = tx.send(Event::Error(format!("could not open browser: {e}")));
                 }
             }
+            Action::SendChat { game_id, text } => {
+                let c = client.clone();
+                let t = tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = c.send_chat(&game_id, &text).await {
+                        let _ = t.send(Event::Error(format!("chat failed: {e}")));
+                    }
+                });
+            }
+            Action::WriteFile { path, contents } => {
+                let result = std::path::Path::new(&path)
+                    .parent()
+                    .map(std::fs::create_dir_all)
+                    .unwrap_or(Ok(()))
+                    .and_then(|_| std::fs::write(&path, contents));
+                let _ = match result {
+                    Ok(()) => tx.send(Event::Info(format!("Saved to {path}"))),
+                    Err(e) => tx.send(Event::Error(format!("could not write {path}: {e}"))),
+                };
+            }
+            Action::FetchPuzzle => {
+                let c = client.clone();
+                let t = tx.clone();
+                tokio::spawn(async move {
+                    match c.next_puzzle().await {
+                        Ok(p) => {
+                            let _ = t.send(Event::Puzzle(p));
+                        }
+                        Err(e) => {
+                            let _ = t.send(Event::Error(format!("could not fetch a puzzle: {e}")));
+                        }
+                    }
+                });
+            }
+            // Handled in the UI loop; it never reaches the worker.
+            Action::Notify { .. } => {}
         }
+    }
+}
+
+/// Terminal bell (Windows Terminal flashes the taskbar) and, if configured, a toast
+/// that looks like a build notification.
+fn notify_user(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mode: &str, title: &str, body: &str) {
+    if mode == "off" {
+        return;
+    }
+    let _ = execute!(terminal.backend_mut(), Print("\x07"));
+    if mode != "toast" {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
+             $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+             $n = $t.GetElementsByTagName('text'); $n.Item(0).AppendChild($t.CreateTextNode('{}')) | Out-Null; \
+             $n.Item(1).AppendChild($t.CreateTextNode('{}')) | Out-Null; \
+             $toast = [Windows.UI.Notifications.ToastNotification]::new($t); \
+             [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($toast)",
+            title.replace('\'', ""),
+            body.replace('\'', "")
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("display notification \"{}\" with title \"{}\"", body.replace('"', ""), title.replace('"', ""));
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("notify-send").args([title, body]).spawn();
     }
 }
 

@@ -87,3 +87,44 @@ fn review_draws_the_past_position_and_eval() {
     assert!(s.contains("#-1"), "{s}");
     assert!(s.contains("3/4"), "{s}");
 }
+
+#[test]
+fn panic_screen_hides_everything_chess() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_key(KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE));
+    let s = screen(&mut app, 100, 40);
+    assert!(!s.contains('\u{265c}'), "{s}");
+    assert!(!s.contains("a  b  c  d"), "{s}");
+    assert!(s.contains("Claude Code"), "{s}");
+    assert!(s.contains("eval cache"), "{s}");
+}
+
+#[test]
+fn clocks_are_drawn_when_present() {
+    use terminal_chess::lichess::Event;
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::GameFull {
+        game_id: "g1".into(), white: "me".into(), black: "x".into(),
+        moves: "e2e4 e7e5".into(), status: "started".into(), wtime: 600_000, btime: 545_000,
+    });
+    let s = screen(&mut app, 100, 40);
+    assert!(s.contains("9:05"), "{s}");
+    assert!(s.contains("10:00") || s.contains("9:59"), "{s}");
+}
+
+#[test]
+fn block_entries_render_with_line_numbers() {
+    use terminal_chess::lichess::Event;
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::GameFull {
+        game_id: "g1".into(), white: "me".into(), black: "x".into(),
+        moves: "e2e4 e7e5".into(), status: "started".into(), wtime: 0, btime: 0,
+    });
+    for c in "/pgn".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let s = screen(&mut app, 100, 40);
+    assert!(s.contains("Write(games/g1.pgn)"), "{s}");
+    assert!(s.contains("1. e4 e5 *"), "{s}");
+}

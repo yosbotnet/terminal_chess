@@ -162,6 +162,57 @@ impl Game {
         Ok(())
     }
 
+    /// Replace the whole game with a space-separated SAN move list (PGN movetext
+    /// without numbers is fine; numbers and result tokens are skipped).
+    pub fn set_san_moves(&mut self, moves: &str) -> Result<()> {
+        let mut fresh = Game::new();
+        for tok in moves.split_whitespace() {
+            let tok = tok.trim_end_matches('.');
+            if tok.is_empty()
+                || tok.chars().all(|c| c.is_ascii_digit())
+                || matches!(tok, "1-0" | "0-1" | "1/2-1/2" | "*")
+            {
+                continue;
+            }
+            let m = fresh.parse_input(tok)?;
+            fresh.play(&m);
+        }
+        *self = fresh;
+        Ok(())
+    }
+
+    /// PGN text: the given headers, a Result header, then numbered moves wrapped at 80 columns.
+    pub fn pgn(&self, headers: &[(&str, &str)], result: &str) -> String {
+        let mut out = String::new();
+        for (k, v) in headers {
+            out.push_str(&format!("[{k} \"{v}\"]\n"));
+        }
+        out.push_str(&format!("[Result \"{result}\"]\n\n"));
+        let mut tokens: Vec<String> = Vec::new();
+        for (i, san) in self.san_history.iter().enumerate() {
+            if i % 2 == 0 {
+                tokens.push(format!("{}.", i / 2 + 1));
+            }
+            tokens.push(san.clone());
+        }
+        tokens.push(result.to_string());
+        let mut line = String::new();
+        for tok in tokens {
+            if !line.is_empty() && line.len() + 1 + tok.len() > 80 {
+                out.push_str(&line);
+                out.push('\n');
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(&tok);
+        }
+        out.push_str(&line);
+        out.push('\n');
+        out
+    }
+
     /// Play a move that was parsed against the current position.
     pub fn play(&mut self, m: &ParsedMove) {
         let san = SanPlus::from_move_and_play_unchecked(&mut self.pos, &m.inner);

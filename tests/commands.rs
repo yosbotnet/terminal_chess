@@ -57,3 +57,14 @@ fn review_and_analyze_commands() {
     assert_eq!(parse("/analyze"), Command::Analyze);
     assert_eq!(parse("/analyse"), Command::Analyze);
 }
+
+#[test]
+fn say_pgn_puzzle_panic_commands() {
+    assert_eq!(parse("/say hi there"), Command::Say("hi there".into()));
+    assert_eq!(parse("/say"), Command::Error("usage: /say <message>".into()));
+    assert_eq!(parse("/pgn"), Command::Pgn { save: None });
+    assert_eq!(parse("/pgn save"), Command::Pgn { save: Some(String::new()) });
+    assert_eq!(parse("/pgn save C:/tmp/x.pgn"), Command::Pgn { save: Some("C:/tmp/x.pgn".into()) });
+    assert_eq!(parse("/puzzle"), Command::Puzzle);
+    assert_eq!(parse("/panic"), Command::Panic);
+}

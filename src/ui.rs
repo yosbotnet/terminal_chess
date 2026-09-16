@@ -18,6 +18,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
     let theme = app.theme().clone();
+    if app.panic_active() {
+        draw_panic(f, area, app, &theme);
+        return;
+    }
     let board_lines = board_block(app, &theme);
     let prompt_height: u16 = if theme.boxed_prompt { 3 } else { 2 };
     let board_height = (board_lines.len() as u16).min(area.height.saturating_sub(6));
@@ -70,6 +74,22 @@ fn entry_lines(entry: &Entry, theme: &Theme, width: usize) -> Vec<Line<'static>>
                 Span::styled(title.clone(), Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
             ]));
             out.push(Line::from(Span::styled(format!("  \u{23bf}  {detail}"), dim)));
+        }
+        Entry::Block { title, lines } => {
+            out.push(Line::from(vec![
+                Span::styled(format!("{} ", theme.tool_bullet), Style::default().fg(theme.good)),
+                Span::styled(title.clone(), Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
+            ]));
+            out.push(Line::from(Span::styled(
+                format!("  \u{23bf}  Wrote {} lines", lines.len()),
+                dim,
+            )));
+            for (i, l) in lines.iter().enumerate() {
+                out.push(Line::from(vec![
+                    Span::styled(format!("{:>8}  ", i + 1), dim),
+                    Span::styled(l.clone(), Style::default().fg(theme.fg)),
+                ]));
+            }
         }
         Entry::Text(t) => {
             for (i, para) in t.lines().enumerate() {
@@ -130,13 +150,18 @@ fn board_block(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let view = app.view();
     let shown = app.board_game();
     // In review the detail line carries the ply, the move, and the evaluation.
-    let note = match app.review_ply() {
-        Some(ply) => {
+    let note = match (app.review_ply(), app.clocks()) {
+        (Some(ply), _) => {
             let san = shown.san_history().last().cloned().unwrap_or_else(|| "start".into());
             let eval = app.current_eval().map(|e| format!("  {e}")).unwrap_or_default();
             format!("  ({ply}/{} {san}{eval})", app.game().move_count())
         }
-        None => String::new(),
+        (None, Some((w, b))) => format!(
+            "  white {}  black {}",
+            App::format_clock(w),
+            App::format_clock(b)
+        ),
+        (None, None) => String::new(),
     };
     let mut lines = Vec::new();
     if app.camouflage() {
@@ -206,4 +231,74 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::styled(right, dim),
     ]);
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// The panic screen: a canned agent session that types itself out over time.
+fn draw_panic(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let prompt_height: u16 = if theme.boxed_prompt { 3 } else { 2 };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(prompt_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    draw_header(f, chunks[0], theme);
+
+    let dim = Style::default().fg(theme.dim);
+    let script = app.panic_script();
+    // One script line every 350ms, so it looks like the agent is still working.
+    let visible = ((app.panic_elapsed_ms() / 350) as usize + 1).min(script.len());
+    let width = chunks[1].width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (kind, text) in &script[..visible] {
+        match *kind {
+            "user" => {
+                lines.push(Line::from(Span::styled(format!("{} {text}", theme.prompt), dim)));
+                lines.push(Line::raw(""));
+            }
+            "tool" => lines.push(Line::from(vec![
+                Span::styled(format!("{} ", theme.tool_bullet), Style::default().fg(theme.good)),
+                Span::styled(text.to_string(), Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)),
+            ])),
+            "detail" => {
+                lines.push(Line::from(Span::styled(format!("  \u{23bf}  {text}"), dim)));
+                lines.push(Line::raw(""));
+            }
+            "spinner" => {
+                let frames = ['\u{2733}', '\u{2736}', '\u{2731}', '\u{2735}'];
+                let frame = frames[(app.panic_elapsed_ms() / 200) as usize % frames.len()];
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{frame} "), Style::default().fg(theme.accent)),
+                    Span::styled(format!("{text}\u{2026} "), Style::default().fg(theme.accent)),
+                    Span::styled("(esc to interrupt)", dim),
+                ]));
+            }
+            _ => {
+                for (j, chunk) in wrap(text, width.saturating_sub(2)).into_iter().enumerate() {
+                    let p = if j == 0 { format!("{} ", theme.text_bullet) } else { "  ".to_string() };
+                    lines.push(Line::from(vec![
+                        Span::styled(p, Style::default().fg(theme.accent)),
+                        Span::styled(chunk, Style::default().fg(theme.fg)),
+                    ]));
+                }
+                lines.push(Line::raw(""));
+            }
+        }
+    }
+    let h = chunks[1].height as usize;
+    let start = lines.len().saturating_sub(h);
+    let visible_lines: Vec<Line<'static>> = lines.drain(start..).collect();
+    f.render_widget(Paragraph::new(visible_lines), chunks[1]);
+
+    let empty = App::new(theme.kind, false, String::new());
+    draw_prompt(f, chunks[2], &empty, theme);
+    let footer = Line::from(vec![
+        Span::styled(format!("  {}", theme.footer_left), dim),
+        Span::raw(" ".repeat((chunks[3].width as usize).saturating_sub(theme.footer_left.len() + theme.footer_right.len() + 4))),
+        Span::styled(format!("{}  ", theme.footer_right), dim),
+    ]);
+    f.render_widget(Paragraph::new(footer), chunks[3]);
 }

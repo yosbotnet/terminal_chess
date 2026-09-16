@@ -1,13 +1,15 @@
 //! Application state and input handling. No terminal or network code lives here,
 //! which keeps the whole thing testable with plain key events.
 
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use shakmaty::{File, Rank, Square};
 
 use crate::commands::{self, Command};
 use crate::game::{Game, Outcome, Side};
-use crate::lichess::{Eval, Event, PlayingGame, PlyEval};
-use crate::render::BoardView;
+use crate::lichess::{Eval, Event, PlayingGame, PlyEval, Puzzle};
+use crate::render::{BoardView, Mark};
 use crate::theme::{Theme, ThemeKind};
 
 /// Requests the UI makes of the Lichess worker.
@@ -23,6 +25,11 @@ pub enum Action {
     /// Evaluate every position of a game. `fens[i]` is the position after `i` half-moves.
     FetchAnalysis { game_id: String, fens: Vec<String> },
     OpenBrowser(String),
+    SendChat { game_id: String, text: String },
+    WriteFile { path: String, contents: String },
+    /// Get the user's attention while the window is not focused.
+    Notify { title: String, body: String },
+    FetchPuzzle,
 }
 
 /// One entry of the fake agent transcript.
@@ -32,6 +39,8 @@ pub enum Entry {
     User(String),
     /// A fake tool call: title like `Edit(src/board.rs)` and a dim detail line.
     Tool { title: String, detail: String },
+    /// A fake tool call whose output is a block of lines, like a file write.
+    Block { title: String, lines: Vec<String> },
     /// Assistant prose.
     Text(String),
     Error(String),
@@ -49,6 +58,9 @@ const FILES: &[&str] = &[
     "src/time/manager.rs",
     "src/main.rs",
 ];
+
+/// Clocks above this are correspondence-style and not worth drawing.
+const MAX_CLOCK_MS: u64 = 12 * 3600 * 1000;
 
 /// Winning chances in [-1, 1] from White's view, the same curve Lichess uses.
 fn winning_chances(e: Eval) -> f64 {
@@ -78,6 +90,13 @@ pub fn judge(before: Eval, after: Eval, mover: Side) -> Option<&'static str> {
     }
 }
 
+struct PuzzleState {
+    puzzle: Puzzle,
+    /// Index into `puzzle.solution` of the next expected move.
+    index: usize,
+    fails: u32,
+}
+
 pub struct App {
     theme: Theme,
     camouflage: bool,
@@ -87,10 +106,14 @@ pub struct App {
     my_side: Option<Side>,
     opponent: String,
     status: String,
+    winner: Option<Side>,
     flipped: bool,
     cursor: Square,
     selected: Option<Square>,
     targets: Vec<Square>,
+    marks: Vec<(Square, Mark)>,
+    arrows: Vec<(Square, Square)>,
+    arrow_from: Option<Square>,
     input: String,
     transcript: Vec<Entry>,
     playing: Vec<PlayingGame>,
@@ -100,8 +123,12 @@ pub struct App {
     review: Option<usize>,
     /// `evals[i]` is the evaluation after `i` half-moves. Empty until analysis arrives.
     evals: Vec<PlyEval>,
-    pub wtime: u64,
-    pub btime: u64,
+    puzzle: Option<PuzzleState>,
+    panic_since: Option<Instant>,
+    focused: bool,
+    wtime: u64,
+    btime: u64,
+    clock_at: Instant,
 }
 
 impl App {
@@ -115,10 +142,14 @@ impl App {
             my_side: None,
             opponent: String::new(),
             status: String::new(),
+            winner: None,
             flipped: false,
             cursor: Square::E2,
             selected: None,
             targets: Vec::new(),
+            marks: Vec::new(),
+            arrows: Vec::new(),
+            arrow_from: None,
             input: String::new(),
             transcript: Vec::new(),
             playing: Vec::new(),
@@ -126,11 +157,15 @@ impl App {
             should_quit: false,
             review: None,
             evals: Vec::new(),
+            puzzle: None,
+            panic_since: None,
+            focused: true,
             wtime: 0,
             btime: 0,
+            clock_at: Instant::now(),
         };
         app.push(Entry::Text(
-            "Ready. Type /games to resume a game, /new ai 3 for Stockfish, /seek for a human, /help for keys.".into(),
+            "Ready. /games resumes a game, /new ai 3 starts Stockfish, /seek finds a human, /puzzle for tactics, /help for keys.".into(),
         ));
         app
     }
@@ -181,12 +216,62 @@ impl App {
     pub fn review_ply(&self) -> Option<usize> {
         self.review
     }
+    pub fn puzzle_active(&self) -> bool {
+        self.puzzle.is_some()
+    }
+    pub fn panic_active(&self) -> bool {
+        self.panic_since.is_some()
+    }
+    /// How long the panic screen has been up, for its typing animation.
+    pub fn panic_elapsed_ms(&self) -> u64 {
+        self.panic_since
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0)
+    }
+    /// The canned session shown by the panic screen: (kind, text) with kind
+    /// "user", "tool", "detail", "text", or "spinner".
+    pub fn panic_script(&self) -> &'static [(&'static str, &'static str)] {
+        PANIC_SCRIPT
+    }
     pub fn current_eval(&self) -> Option<Eval> {
         let ply = self.review.unwrap_or(self.game.move_count());
         self.evals.get(ply).and_then(|e| e.eval)
     }
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
+    }
+
+    /// Remaining (white, black) milliseconds, or `None` when there is no clock worth showing.
+    pub fn clocks(&self) -> Option<(u64, u64)> {
+        if self.game_id.is_none() || self.is_over() || self.puzzle.is_some() {
+            return None;
+        }
+        if self.wtime == 0 || self.wtime > MAX_CLOCK_MS || self.btime > MAX_CLOCK_MS {
+            return None;
+        }
+        let mut w = self.wtime;
+        let mut b = self.btime;
+        if self.game.move_count() >= 2 {
+            let elapsed = self.clock_at.elapsed().as_millis() as u64;
+            match self.game.turn() {
+                Side::White => w = w.saturating_sub(elapsed),
+                Side::Black => b = b.saturating_sub(elapsed),
+            }
+        }
+        Some((w, b))
+    }
+
+    pub fn format_clock(ms: u64) -> String {
+        let s = ms / 1000;
+        let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
+        if h > 0 {
+            format!("{h}:{m:02}:{sec:02}")
+        } else {
+            format!("{m}:{sec:02}")
+        }
     }
 
     pub fn view(&self) -> BoardView {
@@ -207,6 +292,8 @@ impl App {
                 targets: Vec::new(),
                 last_move,
                 check_square,
+                marks: self.marks.clone(),
+                arrows: self.arrows.clone(),
             };
         }
         BoardView {
@@ -216,6 +303,8 @@ impl App {
             targets: self.targets.clone(),
             last_move,
             check_square,
+            marks: self.marks.clone(),
+            arrows: self.arrows.clone(),
         }
     }
 
@@ -227,6 +316,9 @@ impl App {
                 .map(|e| format!(" | {e}"))
                 .unwrap_or_default();
             return format!("review | move {}/{}{}", ply, self.game.move_count(), eval);
+        }
+        if let Some(p) = &self.puzzle {
+            return format!("puzzle {} | rating {} | your move", p.puzzle.id, p.puzzle.rating);
         }
         match (&self.game_id, self.my_side) {
             (Some(_), Some(side)) => {
@@ -247,10 +339,13 @@ impl App {
     }
 
     fn my_turn(&self) -> bool {
-        self.game_id.is_some()
-            && self.my_side == Some(self.game.turn())
-            && !self.is_over()
-            && self.review.is_none()
+        if self.review.is_some() {
+            return false;
+        }
+        if let Some(p) = &self.puzzle {
+            return p.index < p.puzzle.solution.len();
+        }
+        self.game_id.is_some() && self.my_side == Some(self.game.turn()) && !self.is_over()
     }
 
     fn push(&mut self, e: Entry) {
@@ -264,9 +359,20 @@ impl App {
         FILES[self.game.move_count() % FILES.len()]
     }
 
+    fn clear_annotations(&mut self) {
+        self.marks.clear();
+        self.arrows.clear();
+        self.arrow_from = None;
+    }
+
     // ----- key handling -----
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if self.panic_since.is_some() {
+            // Any key brings the game back; the key itself is swallowed.
+            self.panic_since = None;
+            return;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('c') => self.should_quit = true,
@@ -277,12 +383,14 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::F(12) => self.panic_since = Some(Instant::now()),
             KeyCode::Tab => self.camouflage = !self.camouflage,
             KeyCode::Esc => {
                 self.selected = None;
                 self.targets.clear();
                 self.input.clear();
                 self.review = None;
+                self.arrow_from = None;
             }
             KeyCode::Enter => {
                 if self.input.trim().is_empty() {
@@ -300,19 +408,47 @@ impl App {
             KeyCode::Left => self.nav(-1, 0),
             KeyCode::Right => self.nav(1, 0),
             KeyCode::Char(c) => {
-                if self.input.is_empty() {
+                if self.input.is_empty() && self.review.is_none() {
                     match c {
-                        'k' => return self.nav(0, 1),
-                        'j' => return self.nav(0, -1),
-                        'h' => return self.nav(-1, 0),
-                        'l' => return self.nav(1, 0),
                         ' ' => return self.cursor_action(),
+                        'm' => return self.cycle_mark(),
+                        'v' => return self.arrow_key(),
+                        'x' => return self.clear_annotations(),
                         _ => {}
                     }
                 }
                 self.input.push(c);
             }
             _ => {}
+        }
+    }
+
+    fn cycle_mark(&mut self) {
+        let sq = self.cursor;
+        if let Some(pos) = self.marks.iter().position(|(s, _)| *s == sq) {
+            match self.marks[pos].1.next() {
+                Some(next) => self.marks[pos].1 = next,
+                None => {
+                    self.marks.remove(pos);
+                }
+            }
+        } else {
+            self.marks.push((sq, Mark::Green));
+        }
+    }
+
+    fn arrow_key(&mut self) {
+        match self.arrow_from.take() {
+            None => self.arrow_from = Some(self.cursor),
+            Some(from) if from == self.cursor => {}
+            Some(from) => {
+                let arrow = (from, self.cursor);
+                if let Some(pos) = self.arrows.iter().position(|a| *a == arrow) {
+                    self.arrows.remove(pos);
+                } else {
+                    self.arrows.push(arrow);
+                }
+            }
         }
     }
 
@@ -374,16 +510,84 @@ impl App {
     }
 
     fn play_my_move(&mut self, m: crate::game::ParsedMove) {
+        if self.puzzle.is_some() {
+            self.play_puzzle_move(m);
+            return;
+        }
         let Some(id) = self.game_id.clone() else { return };
         let uci = m.to_uci();
         self.game.play(&m);
+        self.log_my_move();
+        self.actions.push(Action::Move { game_id: id, uci });
+    }
+
+    fn log_my_move(&mut self) {
         let san = self.game.san_history().last().cloned().unwrap_or_default();
         let file = self.fake_file();
         self.push(Entry::Tool {
             title: format!("Edit({file})"),
             detail: format!("Updated {file} with 1 addition and 1 removal ({san})"),
         });
-        self.actions.push(Action::Move { game_id: id, uci });
+    }
+
+    fn log_their_move(&mut self) {
+        let san = self.game.san_history().last().cloned().unwrap_or_default();
+        let file = self.fake_file();
+        self.push(Entry::Tool {
+            title: format!("Read({file})"),
+            detail: format!("Read {} lines ({san})", 12 + self.game.move_count() * 3),
+        });
+    }
+
+    fn play_puzzle_move(&mut self, m: crate::game::ParsedMove) {
+        let Some(state) = self.puzzle.as_mut() else { return };
+        let expected = state.puzzle.solution.get(state.index).cloned().unwrap_or_default();
+        let uci = m.to_uci();
+        if uci != expected && uci.trim_end_matches('q') != expected {
+            state.fails += 1;
+            let san = self.game.san_of(&uci).unwrap_or(uci);
+            self.push(Entry::Error(format!("test failed: {san} is not the fix. Try again.")));
+            return;
+        }
+        state.index += 1;
+        self.game.play(&m);
+        self.log_my_move();
+        // The opponent's forced reply, if the line continues.
+        let reply = self
+            .puzzle
+            .as_ref()
+            .and_then(|s| s.puzzle.solution.get(s.index).cloned());
+        if let Some(reply) = reply {
+            if let Ok(rm) = self.game.parse_input(&reply) {
+                self.game.play(&rm);
+                self.log_their_move();
+            }
+            if let Some(s) = self.puzzle.as_mut() {
+                s.index += 1;
+            }
+        }
+        let done = self
+            .puzzle
+            .as_ref()
+            .map(|s| s.index >= s.puzzle.solution.len())
+            .unwrap_or(true);
+        if done {
+            let state = self.puzzle.take().expect("puzzle");
+            let themes = if state.puzzle.themes.is_empty() {
+                String::new()
+            } else {
+                format!(" Themes: {}.", state.puzzle.themes.join(", "))
+            };
+            let tries = if state.fails == 0 {
+                "first try".to_string()
+            } else {
+                format!("{} retries", state.fails)
+            };
+            self.push(Entry::Text(format!(
+                "All tests pass. Solved puzzle {} (rating {}) on the {tries}.{themes} /puzzle for the next one.",
+                state.puzzle.id, state.puzzle.rating
+            )));
+        }
     }
 
     fn submit(&mut self, text: &str) {
@@ -456,7 +660,77 @@ impl App {
                 }
                 None => self.push(Entry::Error("no game to analyze".into())),
             },
+            Command::Say(text) => match self.game_id.clone() {
+                Some(game_id) => self.actions.push(Action::SendChat { game_id, text }),
+                None => self.push(Entry::Error("no game to chat in".into())),
+            },
+            Command::Pgn { save } => self.pgn_command(save),
+            Command::Puzzle => {
+                self.push(Entry::Text("Fetching the next task.".into()));
+                self.actions.push(Action::FetchPuzzle);
+            }
+            Command::Panic => self.panic_since = Some(Instant::now()),
             Command::Error(e) => self.push(Entry::Error(e)),
+        }
+    }
+
+    fn pgn_text(&self) -> (String, String) {
+        let name = match (&self.puzzle, &self.game_id) {
+            (Some(p), _) => format!("puzzle-{}", p.puzzle.id),
+            (None, Some(id)) => id.clone(),
+            (None, None) => "game".to_string(),
+        };
+        let site = format!("https://lichess.org/{name}");
+        let (white, black) = match self.my_side {
+            Some(Side::White) => (self.username.clone(), self.opponent.clone()),
+            Some(Side::Black) => (self.opponent.clone(), self.username.clone()),
+            None => ("?".to_string(), "?".to_string()),
+        };
+        let result = if !self.is_over() {
+            "*"
+        } else {
+            match self.winner.or_else(|| match self.game.outcome() {
+                Some(Outcome::Checkmate { winner }) => Some(winner),
+                _ => None,
+            }) {
+                Some(Side::White) => "1-0",
+                Some(Side::Black) => "0-1",
+                None => "1/2-1/2",
+            }
+        };
+        let headers = [
+            ("Event", "Lichess"),
+            ("Site", site.as_str()),
+            ("White", white.as_str()),
+            ("Black", black.as_str()),
+        ];
+        (name, self.game.pgn(&headers, result))
+    }
+
+    fn pgn_command(&mut self, save: Option<String>) {
+        if self.game.move_count() == 0 {
+            self.push(Entry::Error("no moves to export".into()));
+            return;
+        }
+        let (name, pgn) = self.pgn_text();
+        match save {
+            None => {
+                let lines: Vec<String> = pgn.lines().map(String::from).collect();
+                self.push(Entry::Block { title: format!("Write(games/{name}.pgn)"), lines });
+            }
+            Some(path) => {
+                let path = if path.trim().is_empty() {
+                    let dir = dirs::document_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                    dir.join("chess").join(format!("{name}.pgn")).display().to_string()
+                } else {
+                    path
+                };
+                self.push(Entry::Tool {
+                    title: format!("Write({path})"),
+                    detail: format!("Wrote {} lines", pgn.lines().count()),
+                });
+                self.actions.push(Action::WriteFile { path, contents: pgn });
+            }
         }
     }
 
@@ -503,18 +777,27 @@ impl App {
                 self.cursor = if side == Side::White { Square::E2 } else { Square::E7 };
                 self.selected = None;
                 self.targets.clear();
+                self.clear_annotations();
                 self.review = None;
                 self.evals.clear();
+                self.puzzle = None;
                 self.status = status.clone();
+                self.winner = None;
                 self.wtime = wtime;
                 self.btime = btime;
+                self.clock_at = Instant::now();
                 if let Err(e) = self.game.set_moves(&moves) {
                     self.push(Entry::Error(format!("could not load game: {e}")));
                 }
                 let color = if side == Side::White { "white" } else { "black" };
                 self.push(Entry::Tool {
                     title: format!("Read({})", self.fake_file()),
-                    detail: format!("Read {} lines (vs {}, you are {})", 40 + self.game.move_count(), self.opponent, color),
+                    detail: format!(
+                        "Read {} lines (vs {}, you are {})",
+                        40 + self.game.move_count(),
+                        self.opponent,
+                        color
+                    ),
                 });
                 if self.is_over() {
                     self.report_result(&status, None);
@@ -531,18 +814,23 @@ impl App {
                 }
                 self.wtime = wtime;
                 self.btime = btime;
+                self.clock_at = Instant::now();
                 let after = self.game.move_count();
+                let was_over = self.is_over();
+                self.status = status.clone();
+                self.winner = winner;
                 if after > before {
                     let opponent_moved = self.my_side != Some(self.game.turn().other());
                     if opponent_moved {
-                        let san = self.game.san_history().last().cloned().unwrap_or_default();
-                        let file = self.fake_file();
-                        self.push(Entry::Tool {
-                            title: format!("Read({file})"),
-                            detail: format!("Read {} lines ({san})", 12 + after * 3),
-                        });
+                        self.log_their_move();
                         if self.game.in_check() && self.game.outcome().is_none() {
                             self.push(Entry::Text("Heads up: the current branch fails a check.".into()));
+                        }
+                        if !self.focused && !self.is_over() {
+                            self.actions.push(Action::Notify {
+                                title: "Build finished".into(),
+                                body: "1 task is waiting for your review.".into(),
+                            });
                         }
                     }
                 }
@@ -551,8 +839,6 @@ impl App {
                         self.push(Entry::Text("The other side proposes a draw. /draw to accept.".into()));
                     }
                 }
-                let was_over = self.is_over();
-                self.status = status.clone();
                 if self.is_over() && !was_over {
                     self.report_result(&status, winner);
                 }
@@ -568,7 +854,13 @@ impl App {
                     for (i, g) in list.iter().enumerate() {
                         let color = if g.color == Side::White { "white" } else { "black" };
                         let turn = if g.my_turn { "your move" } else { "waiting" };
-                        text.push_str(&format!("\n  {}. vs {} ({color}, {}, {turn})  /game {}", i + 1, g.opponent, g.speed, i + 1));
+                        text.push_str(&format!(
+                            "\n  {}. vs {} ({color}, {}, {turn})  /game {}",
+                            i + 1,
+                            g.opponent,
+                            g.speed,
+                            i + 1
+                        ));
                     }
                     self.push(Entry::Text(text));
                 }
@@ -588,7 +880,45 @@ impl App {
                 self.evals = evals;
                 self.report_analysis(from_lichess);
             }
+            Event::Puzzle(puzzle) => self.start_puzzle(puzzle),
         }
+    }
+
+    fn start_puzzle(&mut self, puzzle: Puzzle) {
+        let mut game = Game::new();
+        if let Err(e) = game.set_san_moves(&puzzle.pgn) {
+            self.push(Entry::Error(format!("bad puzzle: {e}")));
+            return;
+        }
+        self.game = game;
+        self.game_id = None;
+        self.status = String::new();
+        self.winner = None;
+        let side = self.game.turn();
+        self.my_side = Some(side);
+        self.opponent = "puzzle".into();
+        self.flipped = side == Side::Black;
+        self.cursor = if side == Side::White { Square::E2 } else { Square::E7 };
+        self.selected = None;
+        self.targets.clear();
+        self.clear_annotations();
+        self.review = None;
+        self.evals.clear();
+        let color = if side == Side::White { "white" } else { "black" };
+        self.push(Entry::Tool {
+            title: format!("Read(tests/regress/{}.rs)", puzzle.id.to_lowercase()),
+            detail: format!(
+                "Read {} lines (rating {}, {color} to move)",
+                20 + self.game.move_count(),
+                puzzle.rating
+            ),
+        });
+        let moves = puzzle.solution.len().div_ceil(2);
+        self.push(Entry::Text(format!(
+            "One failing test. Find the fix for {color}: {moves} move{} to go.",
+            if moves > 1 { "s" } else { "" }
+        )));
+        self.puzzle = Some(PuzzleState { puzzle, index: 0, fails: 0 });
     }
 
     fn report_result(&mut self, status: &str, winner: Option<Side>) {
@@ -613,7 +943,7 @@ impl App {
         };
         let mut text = format!("Done. Summary: {verdict} {how} against {}.", self.opponent).replace("  ", " ");
         if self.game.move_count() > 0 && status != "aborted" {
-            text.push_str(" Reviewing the changes now: Left/Right to step, Esc to stop, /analyze for the full report.");
+            text.push_str(" Reviewing the changes now: Left/Right to step, Esc to stop, /analyze for the full report, /pgn to export.");
             self.push(Entry::Text(text));
             self.enter_review();
         } else {
@@ -701,9 +1031,36 @@ impl App {
 }
 
 const HELP: &str = "
-Keys: arrows or hjkl move the cursor, Enter/Space selects and moves, Esc cancels.
-Tab hides the board as file output, Ctrl+T switches theme, Ctrl+C quits.
+Keys: arrows move the cursor, Enter/Space selects and moves, Esc cancels.
+m marks the cursor square (green, red, blue, yellow, off), v twice draws an arrow, x clears.
+Tab hides the board as file output, F12 shows a fake session (any key returns),
+Ctrl+T switches theme, Ctrl+C quits.
 Type moves as e2 e4, e2e4, or Nf3. Commands: /games, /game N, /new ai 1-8,
-/seek 15+10, /seek corr 2, /resign, /draw, /flip, /hide, /theme, /quit.
+/seek 15+10, /seek corr 2, /resign, /draw, /say hi, /pgn, /pgn save [path],
+/puzzle, /flip, /hide, /theme, /panic, /quit.
 After a game: Left/Right step through it, /review restarts that, /analyze opens Lichess.
 ";
+
+const PANIC_SCRIPT: &[(&str, &str)] = &[
+    ("user", "the eval cache keeps missing on transposed positions, can you look into it"),
+    ("text", "I'll start by reading the cache implementation and the tests around it."),
+    ("tool", "Read(src/tt/table.rs)"),
+    ("detail", "Read 212 lines"),
+    ("tool", "Read(tests/transposition.rs)"),
+    ("detail", "Read 88 lines"),
+    ("tool", "Grep(pattern: \"zobrist\", path: \"src\")"),
+    ("detail", "Found 14 matches in 5 files"),
+    ("text", "The hash ignores the en passant file, so two positions that differ only by an en passant right collide and the cached score is reused wrongly. The fix is to fold the ep file into the key."),
+    ("tool", "Edit(src/board/zobrist.rs)"),
+    ("detail", "Updated src/board/zobrist.rs with 6 additions and 1 removal"),
+    ("tool", "Edit(tests/transposition.rs)"),
+    ("detail", "Updated tests/transposition.rs with 19 additions"),
+    ("tool", "Bash(cargo test transposition)"),
+    ("detail", "running 7 tests ... test result: ok. 7 passed; 0 failed"),
+    ("tool", "Bash(cargo bench --bench perft -- --quick)"),
+    ("detail", "perft 5: 4,865,609 nodes in 0.42s (no regression)"),
+    ("text", "Fixed. The key now includes the en passant file, and I added a regression test that covers the case from the report. Next I'm checking whether the same issue affects the pawn hash."),
+    ("tool", "Read(src/engine/pawns.rs)"),
+    ("detail", "Read 143 lines"),
+    ("spinner", "Thinking"),
+];

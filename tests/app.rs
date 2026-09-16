@@ -64,16 +64,6 @@ fn cursor_select_and_move_emits_action() {
     assert!(app.view().selected.is_none());
 }
 
-#[test]
-fn hjkl_moves_cursor_only_when_prompt_is_empty() {
-    let mut app = app_in_game(Side::White);
-    app.handle_key(key(KeyCode::Char('l')));
-    assert_eq!(app.cursor().to_string(), "f2");
-    app.handle_key(key(KeyCode::Char('N')));
-    app.handle_key(key(KeyCode::Char('h')));
-    assert_eq!(app.cursor().to_string(), "f2");
-    assert_eq!(app.input(), "Nh");
-}
 
 #[test]
 fn cursor_respects_flipped_board() {
@@ -286,7 +276,7 @@ fn review_keys_step_through_positions() {
     app.handle_key(key(KeyCode::Left));
     assert_eq!(app.review_ply(), Some(3));
     assert_eq!(app.board_game().move_count(), 3);
-    app.handle_key(key(KeyCode::Char('h')));
+    app.handle_key(key(KeyCode::Left));
     assert_eq!(app.review_ply(), Some(2));
     app.handle_key(key(KeyCode::Up));
     assert_eq!(app.review_ply(), Some(0));
@@ -395,4 +385,282 @@ fn review_status_line_shows_progress() {
     app.handle_key(key(KeyCode::Left));
     assert!(app.status_line().contains("review"), "{}", app.status_line());
     assert!(app.status_line().contains("3/4"), "{}", app.status_line());
+}
+
+// ----- annotations, clock, chat, pgn, notifications, puzzles, panic -----
+
+use terminal_chess::lichess::Puzzle;
+use terminal_chess::render::Mark;
+
+#[test]
+fn letters_always_go_to_the_prompt() {
+    let mut app = app_in_game(Side::White);
+    type_str(&mut app, "h4");
+    assert_eq!(app.cursor().to_string(), "e2");
+    assert_eq!(app.input(), "h4");
+}
+
+#[test]
+fn m_cycles_a_mark_on_the_cursor_square_and_x_clears() {
+    let mut app = app_in_game(Side::White);
+    app.handle_key(key(KeyCode::Char('m')));
+    assert_eq!(app.view().marks, vec![("e2".parse().unwrap(), Mark::Green)]);
+    app.handle_key(key(KeyCode::Char('m')));
+    assert_eq!(app.view().marks[0].1, Mark::Red);
+    app.handle_key(key(KeyCode::Char('m')));
+    app.handle_key(key(KeyCode::Char('m')));
+    assert_eq!(app.view().marks[0].1, Mark::Yellow);
+    app.handle_key(key(KeyCode::Char('m')));
+    assert!(app.view().marks.is_empty());
+    app.handle_key(key(KeyCode::Char('m')));
+    app.handle_key(key(KeyCode::Char('x')));
+    assert!(app.view().marks.is_empty());
+    assert_eq!(app.input(), "");
+}
+
+#[test]
+fn v_twice_draws_an_arrow() {
+    let mut app = app_in_game(Side::White);
+    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Char('v')));
+    assert_eq!(app.view().arrows, vec![("e2".parse().unwrap(), "e4".parse().unwrap())]);
+    // same arrow again removes it
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Char('v')));
+    assert!(app.view().arrows.is_empty());
+}
+
+#[test]
+fn annotation_keys_type_normally_once_the_prompt_has_text() {
+    let mut app = app_in_game(Side::White);
+    type_str(&mut app, "/say mv x");
+    assert_eq!(app.input(), "/say mv x");
+    assert!(app.view().marks.is_empty());
+}
+
+#[test]
+fn clocks_count_down_for_the_side_to_move() {
+    let mut app = app_in_game(Side::White);
+    app.handle_event(Event::GameState {
+        game_id: "g1".into(),
+        moves: "e2e4 e7e5".into(),
+        status: "started".into(),
+        winner: None,
+        wtime: 600_000,
+        btime: 500_000,
+        draw_offer: None,
+    });
+    let (w, b) = app.clocks().expect("clock shown");
+    assert!(w <= 600_000 && w > 598_000, "{w}");
+    assert_eq!(b, 500_000);
+    assert_eq!(App::format_clock(600_000), "10:00");
+    assert_eq!(App::format_clock(59_500), "0:59");
+    assert_eq!(App::format_clock(3_725_000), "1:02:05");
+}
+
+#[test]
+fn clocks_hidden_for_correspondence_or_no_clock() {
+    let mut app = app_in_game(Side::White);
+    assert!(app.clocks().is_none());
+    app.handle_event(Event::GameState {
+        game_id: "g1".into(),
+        moves: "e2e4".into(),
+        status: "started".into(),
+        winner: None,
+        wtime: 172_800_000,
+        btime: 172_800_000,
+        draw_offer: None,
+    });
+    assert!(app.clocks().is_none());
+}
+
+#[test]
+fn say_sends_chat_to_the_current_game() {
+    let mut app = app_in_game(Side::White);
+    type_str(&mut app, "/say gg");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.take_actions(), vec![Action::SendChat { game_id: "g1".into(), text: "gg".into() }]);
+}
+
+#[test]
+fn pgn_command_prints_a_fake_write_tool_call() {
+    let mut app = finished_app();
+    app.take_actions();
+    type_str(&mut app, "/pgn");
+    app.handle_key(key(KeyCode::Enter));
+    match app.transcript().last() {
+        Some(Entry::Block { title, lines }) => {
+            assert!(title.starts_with("Write("), "{title}");
+            assert!(lines.iter().any(|l| l.contains("1. f3 e5 2. g4 Qh4# 0-1")), "{lines:?}");
+            assert!(lines.iter().any(|l| l == "[White \"me\"]"), "{lines:?}");
+            assert!(lines.iter().any(|l| l == "[Black \"Someone\"]"), "{lines:?}");
+        }
+        other => panic!("expected block, got {other:?}"),
+    }
+    assert!(app.take_actions().is_empty());
+}
+
+#[test]
+fn pgn_save_emits_a_write_action() {
+    let mut app = finished_app();
+    app.take_actions();
+    type_str(&mut app, "/pgn save C:\\tmp\\g.pgn");
+    app.handle_key(key(KeyCode::Enter));
+    match app.take_actions().as_slice() {
+        [Action::WriteFile { path, contents }] => {
+            assert_eq!(path, "C:\\tmp\\g.pgn");
+            assert!(contents.contains("Qh4#"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn opponent_move_while_unfocused_notifies() {
+    let mut app = app_in_game(Side::White);
+    app.set_focused(false);
+    app.handle_event(Event::GameState {
+        game_id: "g1".into(),
+        moves: "e2e4 e7e5".into(),
+        status: "started".into(),
+        winner: None,
+        wtime: 0,
+        btime: 0,
+        draw_offer: None,
+    });
+    assert!(app.take_actions().iter().any(|a| matches!(a, Action::Notify { .. })));
+    app.set_focused(true);
+    app.handle_event(Event::GameState {
+        game_id: "g1".into(),
+        moves: "e2e4 e7e5 g1f3 b8c6".into(),
+        status: "started".into(),
+        winner: None,
+        wtime: 0,
+        btime: 0,
+        draw_offer: None,
+    });
+    assert!(!app.take_actions().iter().any(|a| matches!(a, Action::Notify { .. })));
+}
+
+fn puzzle() -> Puzzle {
+    Puzzle {
+        id: "P1".into(),
+        rating: 1200,
+        // Scholar's mate setup: white to play Qxf7#
+        pgn: "e4 e5 Bc4 Nc6 Qh5 Nf6".into(),
+        solution: vec!["h5f7".into()],
+        themes: vec!["mateIn1".into()],
+    }
+}
+
+fn two_step_puzzle() -> Puzzle {
+    Puzzle {
+        id: "P2".into(),
+        rating: 1300,
+        pgn: "e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5 d5 exd5 Nxd5 Nxf7 Kxf7 Qf3+ Ke6 Nc3 Ncb4".into(),
+        solution: vec!["c3d5".into(), "b4d5".into(), "d2d4".into()],
+        themes: vec![],
+    }
+}
+
+#[test]
+fn puzzle_command_fetches_and_event_sets_up_the_board() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    type_str(&mut app, "/puzzle");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.take_actions(), vec![Action::FetchPuzzle]);
+    app.handle_event(Event::Puzzle(puzzle()));
+    assert!(app.puzzle_active());
+    assert_eq!(app.my_side(), Some(Side::White));
+    assert_eq!(app.game().move_count(), 6);
+    assert!(!app.view().flipped);
+}
+
+#[test]
+fn correct_puzzle_move_solves_it_without_network() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::Puzzle(puzzle()));
+    type_str(&mut app, "Qxf7");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.take_actions().is_empty());
+    assert!(!app.puzzle_active());
+    let last = app.transcript().iter().rev().find_map(|e| match e {
+        Entry::Text(t) => Some(t.clone()),
+        _ => None,
+    });
+    assert!(last.unwrap().to_lowercase().contains("solved"));
+}
+
+#[test]
+fn wrong_puzzle_move_is_rejected_and_can_retry() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::Puzzle(puzzle()));
+    type_str(&mut app, "Nf3");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(app.transcript().last(), Some(Entry::Error(_))));
+    assert_eq!(app.game().move_count(), 6);
+    assert!(app.puzzle_active());
+    type_str(&mut app, "h5 f7");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(!app.puzzle_active());
+}
+
+#[test]
+fn puzzle_plays_the_opponent_reply_automatically() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::Puzzle(two_step_puzzle()));
+    assert_eq!(app.my_side(), Some(Side::White));
+    type_str(&mut app, "c3 d5");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.puzzle_active());
+    assert_eq!(app.game().move_count(), 18);
+    assert_eq!(app.game().turn(), Side::White);
+    type_str(&mut app, "d2 d4");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(!app.puzzle_active());
+    assert_eq!(app.game().move_count(), 19);
+}
+
+#[test]
+fn cursor_works_in_puzzles() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::Puzzle(puzzle()));
+    assert!(app.status_line().contains("puzzle"), "{}", app.status_line());
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Right));
+    }
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Up));
+    }
+    assert_eq!(app.cursor().to_string(), "h5");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.view().selected.is_some());
+    for _ in 0..2 {
+        app.handle_key(key(KeyCode::Left));
+    }
+    for _ in 0..2 {
+        app.handle_key(key(KeyCode::Up));
+    }
+    app.handle_key(key(KeyCode::Enter));
+    assert!(!app.puzzle_active());
+}
+
+#[test]
+fn panic_mode_swallows_keys_until_one_is_pressed() {
+    let mut app = app_in_game(Side::White);
+    app.handle_key(key(KeyCode::F(12)));
+    assert!(app.panic_active());
+    app.handle_key(key(KeyCode::Char('e')));
+    assert!(!app.panic_active());
+    assert_eq!(app.input(), "");
+    type_str(&mut app, "/panic");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.panic_active());
+    assert!(!app.panic_script().is_empty());
 }

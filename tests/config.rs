@@ -32,3 +32,9 @@ fn env_token_overrides_file_token() {
     c2.apply_env(None);
     assert_eq!(c2.token.as_deref(), Some("file"));
 }
+
+#[test]
+fn notify_setting_defaults_to_toast() {
+    assert_eq!(Config::from_toml("").unwrap().notify, "toast");
+    assert_eq!(Config::from_toml(r#"notify = "off""#).unwrap().notify, "off");
+}

@@ -56,6 +56,7 @@ pub enum Event {
         evals: Vec<PlyEval>,
         from_lichess: bool,
     },
+    Puzzle(Puzzle),
 }
 
 /// Engine evaluation from White's point of view.
@@ -90,6 +91,42 @@ pub struct PlyEval {
     pub eval: Option<Eval>,
     pub best: Option<String>,
     pub judgment: Option<String>,
+}
+
+/// A tactics puzzle. Play every move of `pgn` to reach the starting position;
+/// the side to move then plays `solution[0]`, the other side `solution[1]`, and so on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Puzzle {
+    pub id: String,
+    pub rating: u32,
+    pub pgn: String,
+    pub solution: Vec<String>,
+    pub themes: Vec<String>,
+}
+
+/// Body of /api/puzzle/next or /api/puzzle/daily.
+pub fn parse_puzzle(body: &str) -> Option<Puzzle> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let game = v.get("game")?;
+    let puzzle = v.get("puzzle")?;
+    let strings = |key: &str| -> Vec<String> {
+        puzzle
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default()
+    };
+    let solution = strings("solution");
+    if solution.is_empty() {
+        return None;
+    }
+    Some(Puzzle {
+        id: str_of(puzzle, "id"),
+        rating: puzzle.get("rating").and_then(Value::as_u64).unwrap_or(0) as u32,
+        pgn: str_of(game, "pgn"),
+        solution,
+        themes: strings("themes"),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,6 +403,29 @@ impl Client {
         }
         let resp = Self::check(resp).await?;
         Ok(parse_cloud_eval(&resp.text().await?))
+    }
+
+    /// The next puzzle for this account, falling back to the daily puzzle.
+    pub async fn next_puzzle(&self) -> Result<Puzzle> {
+        for path in ["/api/puzzle/next", "/api/puzzle/daily"] {
+            let resp = self.get(path).send().await?;
+            if !resp.status().is_success() {
+                continue;
+            }
+            if let Some(p) = parse_puzzle(&resp.text().await?) {
+                return Ok(p);
+            }
+        }
+        Err(anyhow!("no puzzle available"))
+    }
+
+    pub async fn send_chat(&self, game_id: &str, text: &str) -> Result<()> {
+        let form = [("room", "player"), ("text", text)];
+        Self::check(
+            self.post(&format!("/api/board/game/{game_id}/chat")).form(&form).send().await?,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn make_move(&self, game_id: &str, uci: &str) -> Result<()> {

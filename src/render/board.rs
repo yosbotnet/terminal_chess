@@ -35,6 +35,9 @@ fn square_bg(sq: Square, view: &BoardView, theme: &Theme) -> ratatui::style::Col
     if view.selected == Some(sq) {
         return theme.selected;
     }
+    if let Some(m) = view.mark_at(sq) {
+        return m.color();
+    }
     if let Some((from, to)) = view.last_move {
         if sq == from || sq == to {
             return theme.last_move;
@@ -59,7 +62,14 @@ pub fn render(game: &Game, view: &BoardView, theme: &Theme) -> Vec<Line<'static>
             let is_target = view.targets.contains(&sq);
             let is_cursor = view.cursor == Some(sq);
             let bg = square_bg(sq, view, theme);
-            let (left, right) = if is_cursor { ('[', ']') } else { (' ', ' ') };
+            let (left, right) = if is_cursor {
+                ('[', ']')
+            } else {
+                (
+                    view.arrowhead_at(sq).unwrap_or(' '),
+                    if view.is_arrow_origin(sq) { '\u{2022}' } else { ' ' },
+                )
+            };
             let middle = match piece {
                 Some(p) => glyph(p),
                 None if is_target => '\u{00b7}',

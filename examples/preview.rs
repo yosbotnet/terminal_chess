@@ -80,4 +80,37 @@ fn main() {
     ));
     println!("==== Claude review ====");
     dump(&mut app, 90, 40);
+
+    // Annotations and a clock during a live game, then the PGN block.
+    let mut app = App::new(ThemeKind::Codex, false, "me".into());
+    app.handle_event(Event::GameFull {
+        game_id: "g1".into(),
+        white: "me".into(),
+        black: "Someone".into(),
+        moves: "e2e4 c7c5 g1f3 d7d6".into(),
+        status: "started".into(),
+        wtime: 605_000,
+        btime: 588_000,
+    });
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+    app.handle_key(key(KeyCode::Char('m')));
+    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Char('m')));
+    app.handle_key(key(KeyCode::Char('m')));
+    for c in "/pgn".chars() {
+        app.handle_key(key(KeyCode::Char(c)));
+    }
+    app.handle_key(key(KeyCode::Enter));
+    println!("==== Codex live game with marks, arrow, clock, pgn ====");
+    dump(&mut app, 90, 40);
+
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_key(key(KeyCode::F(12)));
+    println!("==== Claude panic screen (first frame) ====");
+    dump(&mut app, 90, 24);
 }

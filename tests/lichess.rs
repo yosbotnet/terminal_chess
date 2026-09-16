@@ -126,3 +126,17 @@ fn eval_formats_from_white_perspective() {
     assert_eq!(Eval::Mate(3).to_string(), "#3");
     assert_eq!(Eval::Mate(-2).to_string(), "#-2");
 }
+
+use terminal_chess::lichess::parse_puzzle;
+
+#[test]
+fn parses_a_puzzle() {
+    let body = r#"{"game":{"id":"AHGPPS44","perf":{"key":"blitz","name":"Blitz"},"rated":true,"players":[{"name":"a","id":"a","color":"white","rating":1500},{"name":"b","id":"b","color":"black","rating":1500}],"pgn":"e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5 d5 exd5 Nxd5 Nxf7 Kxf7 Qf3+ Ke6 Nc3 Ncb4","clock":"5+0"},"puzzle":{"id":"PSjmf","rating":1200,"plays":100,"solution":["c3d5","e6d5","d2d4"],"themes":["short","attack"],"initialPly":15}}"#;
+    let p = parse_puzzle(body).unwrap();
+    assert_eq!(p.id, "PSjmf");
+    assert_eq!(p.rating, 1200);
+    assert_eq!(p.pgn, "e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5 d5 exd5 Nxd5 Nxf7 Kxf7 Qf3+ Ke6 Nc3 Ncb4");
+    assert_eq!(p.solution, vec!["c3d5", "e6d5", "d2d4"]);
+    assert_eq!(p.themes, vec!["short", "attack"]);
+    assert!(parse_puzzle("{}").is_none());
+}

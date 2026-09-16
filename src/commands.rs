@@ -17,6 +17,11 @@ pub enum Command {
     Quit,
     Review,
     Analyze,
+    Say(String),
+    /// `save` is `None` to print the PGN, `Some(path)` to write it (empty path = default).
+    Pgn { save: Option<String> },
+    Puzzle,
+    Panic,
     Error(String),
 }
 
@@ -48,6 +53,21 @@ pub fn parse(input: &str) -> Command {
         "/quit" | "/exit" => Command::Quit,
         "/review" => Command::Review,
         "/analyze" | "/analyse" => Command::Analyze,
+        "/say" => {
+            let msg = text[4..].trim();
+            if msg.is_empty() {
+                Command::Error("usage: /say <message>".into())
+            } else {
+                Command::Say(msg.to_string())
+            }
+        }
+        "/pgn" => match args.first() {
+            None => Command::Pgn { save: None },
+            Some(&"save") => Command::Pgn { save: Some(args[1..].join(" ")) },
+            _ => Command::Error("usage: /pgn or /pgn save [path]".into()),
+        },
+        "/puzzle" => Command::Puzzle,
+        "/panic" => Command::Panic,
         other => Command::Error(format!("unknown command: {other}")),
     }
 }

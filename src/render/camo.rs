@@ -42,6 +42,15 @@ pub fn render(game: &Game, view: &BoardView, theme: &Theme) -> Vec<Line<'static>
             if view.check_square == Some(sq) {
                 style = style.fg(theme.bad);
             }
+            if let Some(m) = view.mark_at(sq) {
+                style = style.bg(m.color());
+            }
+            if view.arrowhead_at(sq).is_some() {
+                style = style.add_modifier(Modifier::UNDERLINED);
+            }
+            if view.is_arrow_origin(sq) {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
             if j > 0 {
                 spans.push(Span::raw(" "));
             }

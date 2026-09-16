@@ -10,6 +10,8 @@ pub struct Config {
     pub token: Option<String>,
     pub theme: String,
     pub camouflage: bool,
+    /// "toast", "bell", or "off".
+    pub notify: String,
 }
 
 impl Default for Config {
@@ -18,6 +20,7 @@ impl Default for Config {
             token: None,
             theme: "claude".to_string(),
             camouflage: false,
+            notify: "toast".to_string(),
         }
     }
 }
