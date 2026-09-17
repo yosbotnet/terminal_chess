@@ -20,7 +20,8 @@ pub enum Command {
     Say(String),
     /// `save` is `None` to print the PGN, `Some(path)` to write it (empty path = default).
     Pgn { save: Option<String> },
-    Puzzle,
+    /// `difficulty` is one of Lichess's names, `None` to keep the current one.
+    Puzzle { difficulty: Option<String> },
     Panic,
     Error(String),
 }
@@ -66,9 +67,27 @@ pub fn parse(input: &str) -> Command {
             Some(&"save") => Command::Pgn { save: Some(args[1..].join(" ")) },
             _ => Command::Error("usage: /pgn or /pgn save [path]".into()),
         },
-        "/puzzle" => Command::Puzzle,
+        "/puzzle" => match args.first() {
+            None => Command::Puzzle { difficulty: None },
+            Some(word) => match puzzle_difficulty(word) {
+                Some(d) => Command::Puzzle { difficulty: Some(d.to_string()) },
+                None => Command::Error("usage: /puzzle [easiest|easy|normal|hard|hardest]".into()),
+            },
+        },
         "/panic" => Command::Panic,
         other => Command::Error(format!("unknown command: {other}")),
+    }
+}
+
+/// Maps a word to one of Lichess's puzzle difficulty names.
+pub fn puzzle_difficulty(word: &str) -> Option<&'static str> {
+    match word {
+        "easiest" => Some("easiest"),
+        "easy" | "easier" => Some("easier"),
+        "normal" => Some("normal"),
+        "hard" | "harder" => Some("harder"),
+        "hardest" => Some("hardest"),
+        _ => None,
     }
 }
 

@@ -12,6 +12,8 @@ pub struct Config {
     pub camouflage: bool,
     /// "toast", "bell", or "off".
     pub notify: String,
+    /// Puzzle difficulty: "easiest", "easier", "normal", "harder", or "hardest".
+    pub puzzle: String,
 }
 
 impl Default for Config {
@@ -21,6 +23,7 @@ impl Default for Config {
             theme: "claude".to_string(),
             camouflage: false,
             notify: "toast".to_string(),
+            puzzle: "easiest".to_string(),
         }
     }
 }

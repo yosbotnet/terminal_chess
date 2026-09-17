@@ -65,6 +65,19 @@ fn say_pgn_puzzle_panic_commands() {
     assert_eq!(parse("/pgn"), Command::Pgn { save: None });
     assert_eq!(parse("/pgn save"), Command::Pgn { save: Some(String::new()) });
     assert_eq!(parse("/pgn save C:/tmp/x.pgn"), Command::Pgn { save: Some("C:/tmp/x.pgn".into()) });
-    assert_eq!(parse("/puzzle"), Command::Puzzle);
+    assert_eq!(parse("/puzzle"), Command::Puzzle { difficulty: None });
     assert_eq!(parse("/panic"), Command::Panic);
+}
+
+#[test]
+fn puzzle_difficulty_argument() {
+    assert_eq!(parse("/puzzle easiest"), Command::Puzzle { difficulty: Some("easiest".into()) });
+    assert_eq!(parse("/puzzle easy"), Command::Puzzle { difficulty: Some("easier".into()) });
+    assert_eq!(parse("/puzzle normal"), Command::Puzzle { difficulty: Some("normal".into()) });
+    assert_eq!(parse("/puzzle hard"), Command::Puzzle { difficulty: Some("harder".into()) });
+    assert_eq!(parse("/puzzle hardest"), Command::Puzzle { difficulty: Some("hardest".into()) });
+    assert_eq!(
+        parse("/puzzle bogus"),
+        Command::Error("usage: /puzzle [easiest|easy|normal|hard|hardest]".into())
+    );
 }

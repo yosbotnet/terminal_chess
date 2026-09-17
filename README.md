@@ -15,6 +15,7 @@ session. Built for a second monitor at work.
    theme = "claude"      # or "codex"
    camouflage = false    # start with the board hidden as file output
    notify = "toast"      # or "bell" or "off"
+   puzzle = "easiest"    # or "easier", "normal", "harder", "hardest"
    ```
 
 3. Build and run:
@@ -63,7 +64,8 @@ Commands:
 | `/say hello` | send a chat message to the opponent (their messages show in the transcript) |
 | `/pgn` | print the game as a fake `Write(...)` tool call so it can be copied |
 | `/pgn save [path]` | write the PGN to a file, default `Documents\chess\<game id>.pgn` |
-| `/puzzle` | fetch your next Lichess puzzle (or the daily one) and solve it on the board |
+| `/puzzle` | fetch a random Lichess puzzle and solve it on the board |
+| `/puzzle hard` | same, and change the difficulty for the session: `easiest`, `easy`, `normal`, `hard`, `hardest` |
 | `/panic` | same as F12 |
 | `/flip`, `/hide`, `/theme`, `/help`, `/quit` | as named |
 
@@ -79,8 +81,12 @@ config to tone that down.
 
 Puzzles load the game so far, put you on the side to move, and check each move
 against the solution. The opponent's replies play automatically. A wrong move
-says "test failed" and lets you retry. Puzzles played this way do not count
-toward your Lichess puzzle rating; Lichess has no API for that.
+says "test failed" and lets you retry.
+
+Puzzles are fetched anonymously, so each `/puzzle` is a new random one and
+nothing touches your Lichess puzzle rating or history. Difficulty is relative
+to a 1500 rating: `easiest` is around 900, `normal` around 1400, `hardest`
+around 2100. A puzzle already shown in this session is never repeated.
 
 Every move you make shows up in the transcript as a fake `Edit(...)` tool
 call; the opponent's moves show as `Read(...)`. The move itself is in the dim

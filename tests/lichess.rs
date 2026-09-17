@@ -140,3 +140,32 @@ fn parses_a_puzzle() {
     assert_eq!(p.themes, vec!["short", "attack"]);
     assert!(parse_puzzle("{}").is_none());
 }
+
+use terminal_chess::lichess::pick_unseen;
+
+#[test]
+fn pick_unseen_skips_puzzles_already_shown() {
+    let seen = vec!["A".to_string()];
+    let mk = |id: &str| terminal_chess::lichess::Puzzle {
+        id: id.into(),
+        rating: 1000,
+        pgn: String::new(),
+        solution: vec![],
+        themes: vec![],
+    };
+    assert!(pick_unseen(mk("A"), &seen).is_none());
+    assert_eq!(pick_unseen(mk("B"), &seen).unwrap().id, "B");
+}
+
+use terminal_chess::lichess::error_message;
+
+#[test]
+fn error_message_prefers_json_error_and_never_dumps_html() {
+    assert_eq!(error_message(400, r#"{"error":"Not your turn"}"#), "lichess 400: Not your turn");
+    assert_eq!(
+        error_message(429, "<!DOCTYPE html><html><body>Too many requests</body></html>"),
+        "lichess 429: too many requests, wait a minute and try again"
+    );
+    assert_eq!(error_message(502, "<html>bad gateway</html>"), "lichess 502");
+    assert_eq!(error_message(403, "Missing scope"), "lichess 403: Missing scope");
+}

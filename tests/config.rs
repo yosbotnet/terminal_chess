@@ -38,3 +38,9 @@ fn notify_setting_defaults_to_toast() {
     assert_eq!(Config::from_toml("").unwrap().notify, "toast");
     assert_eq!(Config::from_toml(r#"notify = "off""#).unwrap().notify, "off");
 }
+
+#[test]
+fn puzzle_difficulty_defaults_to_easiest() {
+    assert_eq!(Config::from_toml("").unwrap().puzzle, "easiest");
+    assert_eq!(Config::from_toml(r#"puzzle = "normal""#).unwrap().puzzle, "normal");
+}

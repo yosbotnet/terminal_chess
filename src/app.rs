@@ -29,7 +29,7 @@ pub enum Action {
     WriteFile { path: String, contents: String },
     /// Get the user's attention while the window is not focused.
     Notify { title: String, body: String },
-    FetchPuzzle,
+    FetchPuzzle { difficulty: String, seen: Vec<String> },
 }
 
 /// One entry of the fake agent transcript.
@@ -124,6 +124,9 @@ pub struct App {
     /// `evals[i]` is the evaluation after `i` half-moves. Empty until analysis arrives.
     evals: Vec<PlyEval>,
     puzzle: Option<PuzzleState>,
+    puzzle_difficulty: String,
+    /// Ids of puzzles shown this session, so a fetch never repeats one.
+    seen_puzzles: Vec<String>,
     panic_since: Option<Instant>,
     focused: bool,
     wtime: u64,
@@ -158,6 +161,8 @@ impl App {
             review: None,
             evals: Vec::new(),
             puzzle: None,
+            puzzle_difficulty: "easiest".into(),
+            seen_puzzles: Vec::new(),
             panic_since: None,
             focused: true,
             wtime: 0,
@@ -216,6 +221,13 @@ impl App {
     pub fn review_ply(&self) -> Option<usize> {
         self.review
     }
+    /// Accepts the same words as `/puzzle`; anything else is ignored.
+    pub fn set_puzzle_difficulty(&mut self, word: &str) {
+        if let Some(d) = crate::commands::puzzle_difficulty(word) {
+            self.puzzle_difficulty = d.to_string();
+        }
+    }
+
     pub fn puzzle_active(&self) -> bool {
         self.puzzle.is_some()
     }
@@ -665,9 +677,15 @@ impl App {
                 None => self.push(Entry::Error("no game to chat in".into())),
             },
             Command::Pgn { save } => self.pgn_command(save),
-            Command::Puzzle => {
+            Command::Puzzle { difficulty } => {
+                if let Some(d) = difficulty {
+                    self.puzzle_difficulty = d;
+                }
                 self.push(Entry::Text("Fetching the next task.".into()));
-                self.actions.push(Action::FetchPuzzle);
+                self.actions.push(Action::FetchPuzzle {
+                    difficulty: self.puzzle_difficulty.clone(),
+                    seen: self.seen_puzzles.clone(),
+                });
             }
             Command::Panic => self.panic_since = Some(Instant::now()),
             Command::Error(e) => self.push(Entry::Error(e)),
@@ -918,6 +936,9 @@ impl App {
             "One failing test. Find the fix for {color}: {moves} move{} to go.",
             if moves > 1 { "s" } else { "" }
         )));
+        if !self.seen_puzzles.contains(&puzzle.id) {
+            self.seen_puzzles.push(puzzle.id.clone());
+        }
         self.puzzle = Some(PuzzleState { puzzle, index: 0, fails: 0 });
     }
 
@@ -1037,7 +1058,7 @@ Tab hides the board as file output, F12 shows a fake session (any key returns),
 Ctrl+T switches theme, Ctrl+C quits.
 Type moves as e2 e4, e2e4, or Nf3. Commands: /games, /game N, /new ai 1-8,
 /seek 15+10, /seek corr 2, /resign, /draw, /say hi, /pgn, /pgn save [path],
-/puzzle, /flip, /hide, /theme, /panic, /quit.
+/puzzle [easy|normal|hard], /flip, /hide, /theme, /panic, /quit.
 After a game: Left/Right step through it, /review restarts that, /analyze opens Lichess.
 ";
 

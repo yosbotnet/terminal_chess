@@ -574,12 +574,58 @@ fn puzzle_command_fetches_and_event_sets_up_the_board() {
     let mut app = App::new(ThemeKind::Claude, false, "me".into());
     type_str(&mut app, "/puzzle");
     app.handle_key(key(KeyCode::Enter));
-    assert_eq!(app.take_actions(), vec![Action::FetchPuzzle]);
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::FetchPuzzle { difficulty: "easiest".into(), seen: vec![] }]
+    );
     app.handle_event(Event::Puzzle(puzzle()));
     assert!(app.puzzle_active());
     assert_eq!(app.my_side(), Some(Side::White));
     assert_eq!(app.game().move_count(), 6);
     assert!(!app.view().flipped);
+}
+
+#[test]
+fn next_puzzle_request_lists_the_ones_already_shown() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.handle_event(Event::Puzzle(puzzle()));
+    type_str(&mut app, "Qxf7");
+    app.handle_key(key(KeyCode::Enter));
+    type_str(&mut app, "/puzzle");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::FetchPuzzle { difficulty: "easiest".into(), seen: vec!["P1".into()] }]
+    );
+}
+
+#[test]
+fn puzzle_difficulty_sticks_for_the_session() {
+    let mut app = App::new(ThemeKind::Claude, false, "me".into());
+    app.set_puzzle_difficulty("normal");
+    type_str(&mut app, "/puzzle");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::FetchPuzzle { difficulty: "normal".into(), seen: vec![] }]
+    );
+    type_str(&mut app, "/puzzle hard");
+    app.handle_key(key(KeyCode::Enter));
+    type_str(&mut app, "/puzzle");
+    app.handle_key(key(KeyCode::Enter));
+    let actions = app.take_actions();
+    assert_eq!(actions.len(), 2);
+    assert!(actions
+        .iter()
+        .all(|a| matches!(a, Action::FetchPuzzle { difficulty, .. } if difficulty == "harder")));
+    // An unknown value from the config is ignored.
+    app.set_puzzle_difficulty("bogus");
+    type_str(&mut app, "/puzzle");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(
+        app.take_actions().as_slice(),
+        [Action::FetchPuzzle { difficulty, .. }] if difficulty == "harder"
+    ));
 }
 
 #[test]

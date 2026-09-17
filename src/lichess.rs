@@ -104,7 +104,12 @@ pub struct Puzzle {
     pub themes: Vec<String>,
 }
 
-/// Body of /api/puzzle/next or /api/puzzle/daily.
+/// `puzzle` unless it was already shown this session.
+pub fn pick_unseen(puzzle: Puzzle, seen: &[String]) -> Option<Puzzle> {
+    (!seen.contains(&puzzle.id)).then_some(puzzle)
+}
+
+/// Body of /api/puzzle/next.
 pub fn parse_puzzle(body: &str) -> Option<Puzzle> {
     let v: Value = serde_json::from_str(body).ok()?;
     let game = v.get("game")?;
@@ -296,6 +301,25 @@ pub fn parse_playing(body: &str) -> Result<Vec<PlayingGame>> {
         .collect())
 }
 
+/// One line for a failed request. Lichess answers some errors with a full HTML
+/// page, which must never reach the transcript.
+pub fn error_message(status: u16, body: &str) -> String {
+    let json_error = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from));
+    if let Some(msg) = json_error {
+        return format!("lichess {status}: {msg}");
+    }
+    if status == 429 {
+        return format!("lichess {status}: too many requests, wait a minute and try again");
+    }
+    let text = body.trim();
+    if text.is_empty() || text.starts_with('<') || text.len() > 200 {
+        return format!("lichess {status}");
+    }
+    format!("lichess {status}: {text}")
+}
+
 /// Async client. Every method is safe to call from a spawned task.
 #[derive(Clone)]
 pub struct Client {
@@ -324,13 +348,9 @@ impl Client {
         if resp.status().is_success() {
             return Ok(resp);
         }
-        let status = resp.status();
+        let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from))
-            .unwrap_or(body);
-        Err(anyhow!("lichess {status}: {msg}"))
+        Err(anyhow!(error_message(status, &body)))
     }
 
     pub async fn username(&self) -> Result<String> {
@@ -405,18 +425,29 @@ impl Client {
         Ok(parse_cloud_eval(&resp.text().await?))
     }
 
-    /// The next puzzle for this account, falling back to the daily puzzle.
-    pub async fn next_puzzle(&self) -> Result<Puzzle> {
-        for path in ["/api/puzzle/next", "/api/puzzle/daily"] {
-            let resp = self.get(path).send().await?;
-            if !resp.status().is_success() {
-                continue;
+    /// A random puzzle that is not in `seen`. Asked without the token on purpose:
+    /// with it, Lichess keeps returning the account's current puzzle until it is
+    /// solved on the site, and the endpoint needs a scope the board token lacks.
+    pub async fn next_puzzle(&self, difficulty: &str, seen: &[String]) -> Result<Puzzle> {
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             }
-            if let Some(p) = parse_puzzle(&resp.text().await?) {
+            let resp = self
+                .http
+                .get(format!("{BASE}/api/puzzle/next"))
+                .query(&[("difficulty", difficulty)])
+                .header("Accept", "application/json")
+                .send()
+                .await?;
+            let resp = Self::check(resp).await?;
+            let puzzle = parse_puzzle(&resp.text().await?)
+                .ok_or_else(|| anyhow!("puzzle response was not understood"))?;
+            if let Some(p) = pick_unseen(puzzle, seen) {
                 return Ok(p);
             }
         }
-        Err(anyhow!("no puzzle available"))
+        Err(anyhow!("lichess kept returning puzzles already shown, try again"))
     }
 
     pub async fn send_chat(&self, game_id: &str, text: &str) -> Result<()> {

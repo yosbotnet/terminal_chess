@@ -35,7 +35,8 @@ async fn main() -> Result<()> {
         }
     };
     let theme = ThemeKind::from_name(&cfg.theme).unwrap_or(ThemeKind::Claude);
-    let app = App::new(theme, cfg.camouflage, username);
+    let mut app = App::new(theme, cfg.camouflage, username);
+    app.set_puzzle_difficulty(&cfg.puzzle);
 
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, app, client, cfg.notify.clone()).await;
@@ -287,11 +288,11 @@ async fn worker(client: Client, mut rx: mpsc::UnboundedReceiver<Action>, tx: mps
                     Err(e) => tx.send(Event::Error(format!("could not write {path}: {e}"))),
                 };
             }
-            Action::FetchPuzzle => {
+            Action::FetchPuzzle { difficulty, seen } => {
                 let c = client.clone();
                 let t = tx.clone();
                 tokio::spawn(async move {
-                    match c.next_puzzle().await {
+                    match c.next_puzzle(&difficulty, &seen).await {
                         Ok(p) => {
                             let _ = t.send(Event::Puzzle(p));
                         }
